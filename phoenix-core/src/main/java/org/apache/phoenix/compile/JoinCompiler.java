@@ -72,6 +72,8 @@ import org.apache.phoenix.parse.TableNodeVisitor;
 import org.apache.phoenix.parse.TableWildcardParseNode;
 import org.apache.phoenix.parse.TraverseNoParseNodeVisitor;
 import org.apache.phoenix.parse.WildcardParseNode;
+import org.apache.phoenix.query.QueryServices;
+import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.AmbiguousColumnException;
 import org.apache.phoenix.schema.ColumnNotFoundException;
 import org.apache.phoenix.schema.ColumnRef;
@@ -101,6 +103,7 @@ public class JoinCompiler {
     
     public static class JoinSpec {
         private ColumnResolver origResolver;
+        private boolean favorStarJoin;
         private TableNode mainTableNode;
         private TableRef mainTable;
         private List<AliasedNode> select; // all basic nodes related to mainTable, no aggregation.
@@ -110,8 +113,9 @@ public class JoinCompiler {
         private Map<TableRef, JoinTable> tableRefToJoinTableMap;
         private Map<ColumnRef, ColumnRefType> columnRefs;
         
-        private JoinSpec(SelectStatement statement, ColumnResolver resolver) throws SQLException {
+        private JoinSpec(SelectStatement statement, ColumnResolver resolver, boolean favorStarJoin) throws SQLException {
             this.origResolver = resolver;
+            this.favorStarJoin = favorStarJoin;
             List<AliasedNode> selectList = statement.getSelect();
             List<TableNode> tableNodes = statement.getFrom();
             assert (tableNodes.size() > 1);
@@ -205,9 +209,10 @@ public class JoinCompiler {
             }
         }
         
-        private JoinSpec(ColumnResolver resolver, TableNode tableNode, TableRef table, List<AliasedNode> select, List<ParseNode> preFilters, 
+        private JoinSpec(ColumnResolver resolver, boolean favorStarJoin, TableNode tableNode, TableRef table, List<AliasedNode> select, List<ParseNode> preFilters, 
                 List<ParseNode> postFilters, List<JoinTable> joinTables, Map<TableRef, JoinTable> tableRefToJoinTableMap, Map<ColumnRef, ColumnRefType> columnRefs) {
             this.origResolver = resolver;
+            this.favorStarJoin = favorStarJoin;
             this.mainTableNode = tableNode;
             this.mainTable = table;
             this.select = select;
@@ -272,6 +277,43 @@ public class JoinCompiler {
             	return expressions.get(0);
             
             return AndExpression.create(expressions);
+        }
+        
+        /**
+         * Returns a boolean vector indicating whether the evaluation of join expressions
+         * can be evaluated at an early stage if the input JoinSpec can be taken as a
+         * star join. Otherwise returns null.  
+         * @param join the JoinSpec
+         * @return a boolean vector for a star join; or null for non star join.
+         */
+        public boolean[] getStarJoinVector() {
+            assert(!joinTables.isEmpty());
+            
+            int count = joinTables.size();
+            boolean[] vector = new boolean[count];
+            boolean forceStarJoin = false;
+            for (int i = 0; i < count; i++) {
+                JoinTable joinTable = joinTables.get(i);
+                if (joinTable.getType() != JoinType.Left 
+                        && joinTable.getType() != JoinType.Inner)
+                    return null;
+                if (joinTable.getType() == JoinType.Left) {
+                    forceStarJoin = true;
+                }
+                vector[i] = true;
+                Iterator<TableRef> iter = joinTable.getLeftTableRefs().iterator();
+                while (vector[i] == true && iter.hasNext()) {
+                    TableRef tableRef = iter.next();
+                    if (!tableRef.equals(mainTable)) {
+                        vector[i] = false;
+                    }
+                }
+            }
+            
+            if (!favorStarJoin && !forceStarJoin)
+                return null;
+            
+            return vector;
         }
         
         protected boolean isWildCardSelect(TableRef table) {
@@ -490,7 +532,7 @@ public class JoinCompiler {
     }
     
     public static JoinSpec getSubJoinSpecWithoutPostFilters(JoinSpec join) {
-        return new JoinSpec(join.origResolver, join.mainTableNode, join.mainTable, join.select, join.preFilters, new ArrayList<ParseNode>(), 
+        return new JoinSpec(join.origResolver, join.favorStarJoin, join.mainTableNode, join.mainTable, join.select, join.preFilters, new ArrayList<ParseNode>(), 
                 join.joinTables.subList(0, join.joinTables.size() - 1), join.tableRefToJoinTableMap, join.columnRefs);
     }
     
@@ -901,7 +943,7 @@ public class JoinCompiler {
     }
     
     public static JoinSpec getJoinSpec(StatementContext context, SelectStatement statement) throws SQLException {
-        return new JoinSpec(statement, context.getResolver());
+        return new JoinSpec(statement, context.getResolver(), context.getConnection().getQueryServices().getProps().getBoolean(QueryServices.FAVOR_STAR_JOIN_ATTRIB, QueryServicesOptions.DEFAULT_FAVOR_STAR_JOIN));
     }
     
     public static SelectStatement optimize(StatementContext context, SelectStatement select, PhoenixStatement statement) throws SQLException {
@@ -1054,36 +1096,6 @@ public class JoinCompiler {
         List<? extends TableNode> from = Collections.singletonList(NODE_FACTORY.namedTable(tableAlias == null ? null : '"' + tableAlias + '"', tName));
 
         return NODE_FACTORY.select(from, select.getHint(), false, selectList, where, groupBy, null, orderBy, null, 0, false);
-    }
-    
-    /**
-     * Returns a boolean vector indicating whether the evaluation of join expressions
-     * can be evaluated at an early stage if the input JoinSpec can be taken as a
-     * star join. Otherwise returns null.  
-     * @param join the JoinSpec
-     * @return a boolean vector for a star join; or null for non star join.
-     */
-    public static boolean[] getStarJoinVector(JoinSpec join) {
-        assert(!join.getJoinTables().isEmpty());
-        
-        int count = join.getJoinTables().size();
-        boolean[] vector = new boolean[count];
-        for (int i = 0; i < count; i++) {
-        	JoinTable joinTable = join.getJoinTables().get(i);
-            if (joinTable.getType() != JoinType.Left 
-                    && joinTable.getType() != JoinType.Inner)
-                return null;
-            vector[i] = true;
-            Iterator<TableRef> iter = joinTable.getLeftTableRefs().iterator();
-            while (vector[i] == true && iter.hasNext()) {
-            	TableRef tableRef = iter.next();
-                if (!tableRef.equals(join.getMainTable())) {
-                    vector[i] = false;
-                }
-            }
-        }
-        
-        return vector;
     }
     
     public static SelectStatement getSubqueryWithoutJoin(SelectStatement statement, JoinSpec join) {

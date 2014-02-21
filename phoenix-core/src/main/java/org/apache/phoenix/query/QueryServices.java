@@ -77,9 +77,10 @@ public interface QueryServices extends SQLCloseable {
     public static final String IMMUTABLE_ROWS_ATTRIB  = "phoenix.mutate.immutableRows";
     public static final String INDEX_MUTATE_BATCH_SIZE_THRESHOLD_ATTRIB  = "phoenix.index.mutableBatchSizeThreshold";
     public static final String DROP_METADATA_ATTRIB  = "phoenix.schema.dropMetaData";
+    public static final String FAVOR_STAR_JOIN_ATTRIB = "phoenix.join.favorStarJoin";
     public static final String GROUPBY_SPILLABLE_ATTRIB  = "phoenix.groupby.spillable";
     public static final String GROUPBY_SPILL_FILES_ATTRIB = "phoenix.groupby.spillFiles";
-    public static final String GROUPBY_MAX_CACHE_SIZE_ATTRIB = "phoenix.groupby.maxCacheSize";
+    public static final String GROUPBY_MAX_CACHE_SIZE_ATTRIB = "phoenix.groupby.maxCacheSize";    
 
     public static final String CALL_QUEUE_PRODUCER_ATTRIB_NAME = "CALL_QUEUE_PRODUCER";
     
