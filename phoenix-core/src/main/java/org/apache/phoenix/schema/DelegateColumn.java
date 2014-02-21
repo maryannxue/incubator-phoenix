@@ -1,6 +1,4 @@
 /*
- * Copyright 2014 The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -67,5 +65,10 @@ public class DelegateColumn extends DelegateDatum implements PColumn {
     @Override
     public Integer getArraySize() {
         return getDelegate().getArraySize();
+    }
+
+    @Override
+    public byte[] getViewConstant() {
+        return getDelegate().getViewConstant();
     }
 }

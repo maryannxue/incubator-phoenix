@@ -1,6 +1,4 @@
 /*
- * Copyright 2014 The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -25,7 +23,6 @@ import java.util.Collections;
 import java.util.List;
 
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.index.util.ImmutableBytesPtr;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.phoenix.compile.GroupByCompiler.GroupBy;
 import org.apache.phoenix.compile.JoinCompiler.JoinSpec;
@@ -36,16 +33,17 @@ import org.apache.phoenix.compile.JoinCompiler.ProjectedPTableWrapper;
 import org.apache.phoenix.compile.OrderByCompiler.OrderBy;
 import org.apache.phoenix.execute.AggregatePlan;
 import org.apache.phoenix.execute.BasicQueryPlan;
-import org.apache.phoenix.execute.DegenerateQueryPlan;
 import org.apache.phoenix.execute.HashJoinPlan;
 import org.apache.phoenix.execute.ScanPlan;
 import org.apache.phoenix.expression.Expression;
+import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.iterate.ParallelIterators.ParallelIteratorFactory;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.jdbc.PhoenixStatement;
 import org.apache.phoenix.join.HashJoinInfo;
 import org.apache.phoenix.join.ScanProjector;
+import org.apache.phoenix.parse.HintNode.Hint;
 import org.apache.phoenix.parse.JoinTableNode.JoinType;
 import org.apache.phoenix.parse.ParseNode;
 import org.apache.phoenix.parse.SQLParser;
@@ -54,9 +52,7 @@ import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.schema.AmbiguousColumnException;
 import org.apache.phoenix.schema.ColumnNotFoundException;
 import org.apache.phoenix.schema.PDatum;
-import org.apache.phoenix.schema.PIndexState;
 import org.apache.phoenix.schema.PTable;
-import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.TableRef;
 import org.apache.phoenix.util.ScanUtil;
 
@@ -79,7 +75,7 @@ public class QueryCompiler {
     private static final String LOAD_COLUMN_FAMILIES_ON_DEMAND_ATTR = "_ondemand_";
     private final PhoenixStatement statement;
     private final Scan scan;
-    private final Scan scanCopy;
+    private final Scan originalScan;
     private final ColumnResolver resolver;
     private final SelectStatement select;
     private final List<? extends PDatum> targetColumns;
@@ -99,7 +95,11 @@ public class QueryCompiler {
         if (statement.getConnection().getQueryServices().getLowestClusterHBaseVersion() >= PhoenixDatabaseMetaData.ESSENTIAL_FAMILY_VERSION_THRESHOLD) {
             this.scan.setAttribute(LOAD_COLUMN_FAMILIES_ON_DEMAND_ATTR, QueryConstants.TRUE);
         }
-        this.scanCopy = ScanUtil.newScan(scan);
+        if (select.getHint().hasHint(Hint.NO_CACHE)) {
+            scan.setCacheBlocks(false);
+        }
+
+        this.originalScan = ScanUtil.newScan(scan);
     }
 
     /**
@@ -163,7 +163,7 @@ public class QueryCompiler {
                     throw new SQLFeatureNotSupportedException("Sub queries not supported.");
                 ProjectedPTableWrapper subProjTable = join.createProjectedTable(joinTable.getTable(), false);
                 ColumnResolver resolver = join.getColumnResolver(subProjTable);
-                Scan subScan = ScanUtil.newScan(scanCopy);
+                Scan subScan = ScanUtil.newScan(originalScan);
                 ScanProjector.serializeProjectorIntoScan(subScan, JoinCompiler.getScanProjector(subProjTable));
                 StatementContext subContext = new StatementContext(statement, resolver, binds, subScan);
                 subContext.setCurrentTable(joinTable.getTable());
@@ -211,7 +211,7 @@ public class QueryCompiler {
             SelectStatement lhs = JoinCompiler.getSubQueryWithoutLastJoin(select, join);
             SelectStatement rhs = JoinCompiler.getSubqueryForLastJoinTable(select, join);
             JoinSpec lhsJoin = JoinCompiler.getSubJoinSpecWithoutPostFilters(join);
-            Scan subScan = ScanUtil.newScan(scanCopy);
+            Scan subScan = ScanUtil.newScan(originalScan);
             StatementContext lhsCtx = new StatementContext(statement, context.getResolver(), binds, subScan);
             QueryPlan lhsPlan = compileJoinQuery(lhsCtx, lhs, binds, lhsJoin, true);
             ColumnResolver lhsResolver = lhsCtx.getResolver();
@@ -242,12 +242,6 @@ public class QueryCompiler {
         PhoenixConnection connection = statement.getConnection();
         ColumnResolver resolver = context.getResolver();
         TableRef tableRef = context.getCurrentTable();
-        // Short circuit out if we're compiling an index query and the index isn't active.
-        // We must do this after the ColumnResolver resolves the table, as we may be updating the local
-        // cache of the index table and it may now be inactive.
-        if (tableRef.getTable().getType() == PTableType.INDEX && tableRef.getTable().getIndexState() != PIndexState.ACTIVE) {
-            return new DegenerateQueryPlan(context, select, tableRef);
-        }
         PTable table = tableRef.getTable();
         if (table.getViewStatement() != null) {
             ParseNode viewNode = new SQLParser(table.getViewStatement()).parseQuery().getWhere();

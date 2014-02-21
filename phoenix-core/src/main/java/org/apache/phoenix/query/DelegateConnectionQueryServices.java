@@ -1,6 +1,4 @@
 /*
- * Copyright 2014 The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -120,8 +118,8 @@ public class DelegateConnectionQueryServices extends DelegateQueryServices imple
     }
 
     @Override
-    public MetaDataMutationResult addColumn(List<Mutation> tabeMetaData, PTableType tableType, List<Pair<byte[],Map<String,Object>>> families ) throws SQLException {
-        return getDelegate().addColumn(tabeMetaData, tableType, families);
+    public MetaDataMutationResult addColumn(List<Mutation> tabeMetaData, List<Pair<byte[],Map<String,Object>>> families, PTable table) throws SQLException {
+        return getDelegate().addColumn(tabeMetaData, families, table);
     }
 
 

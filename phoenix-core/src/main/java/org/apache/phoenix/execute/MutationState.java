@@ -1,6 +1,4 @@
 /*
- * Copyright 2014 The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -38,11 +36,11 @@ import org.slf4j.LoggerFactory;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import org.apache.hadoop.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.cache.ServerCacheClient;
 import org.apache.phoenix.cache.ServerCacheClient.ServerCache;
 import org.apache.phoenix.coprocessor.MetaDataProtocol.MetaDataMutationResult;
 import org.apache.phoenix.exception.SQLExceptionCode;
+import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.index.IndexMaintainer;
 import org.apache.phoenix.index.IndexMetaDataCacheClient;
 import org.apache.phoenix.index.PhoenixIndexCodec;
@@ -314,7 +312,14 @@ public class MutationState implements SQLCloseable {
                 for (Entry<byte[], List<KeyValue>> entry : mutation.getFamilyMap().entrySet()) {
                     if (entry.getValue() != null) {
                         for (KeyValue kv : entry.getValue()) {
-                            byteSize += kv.getBuffer().length;
+                            try {
+                                byteSize += kv.getBuffer().length;
+                            } catch(UnsupportedOperationException e) {
+                                // kv.getBuffer isn't supported, so we need to figure out the length of
+                                // the kv from the rest of the information
+                                byteSize += kv.getKeyLength();
+                                byteSize += kv.getValueLength();
+                            }
                             keyValueCount++;
                         }
                     }

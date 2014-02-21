@@ -1,6 +1,4 @@
 /*
- * Copyright 2014 The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -6625,6 +6623,15 @@ public enum PDataType {
     public abstract boolean isFixedWidth();
     public abstract Integer getByteSize();
 
+    /*
+     * We need an empty byte array to mean null, since
+     * we have no other representation in the row key
+     * for null.
+     */
+    public final boolean isNull(byte[] value) {
+        return value == null || value.length == 0;
+    }
+    
     public abstract byte[] toBytes(Object object);
     
     public byte[] toBytes(Object object, SortOrder sortOrder) {
