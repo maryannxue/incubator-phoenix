@@ -21,7 +21,6 @@ import static org.apache.phoenix.query.QueryServices.CALL_QUEUE_PRODUCER_ATTRIB_
 import static org.apache.phoenix.query.QueryServices.CALL_QUEUE_ROUND_ROBIN_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.DATE_FORMAT_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.DROP_METADATA_ATTRIB;
-import static org.apache.phoenix.query.QueryServices.FAVOR_STAR_JOIN_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.GROUPBY_MAX_CACHE_SIZE_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.GROUPBY_SPILLABLE_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.GROUPBY_SPILL_FILES_ATTRIB;
@@ -89,7 +88,6 @@ public class QueryServicesOptions {
     public static final boolean DEFAULT_USE_INDEXES = true; // Use indexes
     public static final boolean DEFAULT_IMMUTABLE_ROWS = false; // Tables rows may be updated
     public static final boolean DEFAULT_DROP_METADATA = true; // Drop meta data also.
-    public static final boolean DEFAULT_FAVOR_STAR_JOIN = true; // Prefer using star-join
     
     public final static int DEFAULT_MUTATE_BATCH_SIZE = 1000; // Batch size for UPSERT SELECT and DELETE
 	// The only downside of it being out-of-sync is that the parallelization of the scan won't be as balanced as it could be.
@@ -113,6 +111,7 @@ public class QueryServicesOptions {
     
     public static final int DEFAULT_SEQUENCE_CACHE_SIZE = 100;  // reserve 100 sequences at a time
     public static final int DEFAULT_INDEX_MAX_FILESIZE_PERC = 50; // % of data table max file size for index table
+    
     
     private final Configuration config;
     
@@ -163,7 +162,6 @@ public class QueryServicesOptions {
             .setIfUnset(INDEX_MUTATE_BATCH_SIZE_THRESHOLD_ATTRIB, DEFAULT_INDEX_MUTATE_BATCH_SIZE_THRESHOLD)
             .setIfUnset(MAX_SPOOL_TO_DISK_BYTES_ATTRIB, DEFAULT_MAX_SPOOL_TO_DISK_BYTES)
             .setIfUnset(DROP_METADATA_ATTRIB, DEFAULT_DROP_METADATA)
-            .setIfUnset(FAVOR_STAR_JOIN_ATTRIB, DEFAULT_FAVOR_STAR_JOIN)
             .setIfUnset(GROUPBY_SPILLABLE_ATTRIB, DEFAULT_GROUPBY_SPILLABLE)
             .setIfUnset(GROUPBY_MAX_CACHE_SIZE_ATTRIB, DEFAULT_GROUPBY_MAX_CACHE_MAX)
             .setIfUnset(GROUPBY_SPILL_FILES_ATTRIB, DEFAULT_GROUPBY_SPILL_FILES)
@@ -363,10 +361,6 @@ public class QueryServicesOptions {
         return config.getBoolean(DROP_METADATA_ATTRIB, DEFAULT_DROP_METADATA);
     }
     
-    public boolean isFavorStarJoin() {
-        return config.getBoolean(FAVOR_STAR_JOIN_ATTRIB, DEFAULT_FAVOR_STAR_JOIN);
-    }
-    
     public boolean isSpillableGroupByEnabled() {
         return config.getBoolean(GROUPBY_SPILLABLE_ATTRIB, DEFAULT_GROUPBY_SPILLABLE);
     }
@@ -405,10 +399,6 @@ public class QueryServicesOptions {
     
     public QueryServicesOptions setImmutableRows(boolean isImmutableRows) {
         return set(IMMUTABLE_ROWS_ATTRIB, isImmutableRows);
-    }
-    
-    public QueryServicesOptions setFavorStarJoin(boolean favorStarJoin) {
-        return set(FAVOR_STAR_JOIN_ATTRIB, favorStarJoin);
     }
 
     public QueryServicesOptions setWALEditCodec(String walEditCodec) {
