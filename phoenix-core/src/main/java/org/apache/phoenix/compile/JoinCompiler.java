@@ -290,16 +290,17 @@ public class JoinCompiler {
             assert(!joinTables.isEmpty());
             
             int count = joinTables.size();
+            if (!favorStarJoin 
+                    && count > 1 
+                    && joinTables.get(count - 1).getType() != JoinType.Left)
+                return null;
+
             boolean[] vector = new boolean[count];
-            boolean forceStarJoin = false;
             for (int i = 0; i < count; i++) {
                 JoinTable joinTable = joinTables.get(i);
                 if (joinTable.getType() != JoinType.Left 
                         && joinTable.getType() != JoinType.Inner)
                     return null;
-                if (joinTable.getType() == JoinType.Left) {
-                    forceStarJoin = true;
-                }
                 vector[i] = true;
                 Iterator<TableRef> iter = joinTable.getLeftTableRefs().iterator();
                 while (vector[i] == true && iter.hasNext()) {
@@ -309,9 +310,6 @@ public class JoinCompiler {
                     }
                 }
             }
-            
-            if (!favorStarJoin && !forceStarJoin && count > 1)
-                return null;
             
             return vector;
         }
