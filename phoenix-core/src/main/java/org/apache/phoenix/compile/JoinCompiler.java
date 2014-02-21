@@ -310,7 +310,7 @@ public class JoinCompiler {
                 }
             }
             
-            if (!favorStarJoin && !forceStarJoin)
+            if (!favorStarJoin && !forceStarJoin && count > 1)
                 return null;
             
             return vector;
