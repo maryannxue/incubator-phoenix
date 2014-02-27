@@ -19,10 +19,17 @@ package org.apache.phoenix.end2end;
 
 import org.junit.Test;
 
-public class TenantSpecificViewIndexTest extends BaseTenantSpecificViewIndexTest {
+public class SaltedViewTest extends BaseViewTest {
+    
+    /**
+     * Salted tests must be in their own test file to ensure that the underlying
+     * table is dropped. Otherwise, the splits may not be performed.
+     * TODO: we should throw in that case
+     * 
+     * @throws Exception
+     */
     @Test
-    public void testUpdatableView() throws Exception {
-        testUpdatableView(null);
+    public void testSaltedUpdatableViewWithIndex() throws Exception {
+        testUpdatableViewWithIndex(3);
     }
-
 }
