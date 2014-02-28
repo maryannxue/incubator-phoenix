@@ -82,17 +82,17 @@ public class TenantCacheImpl implements TenantCache {
     @Override
     public Closeable addServerCache(ImmutableBytesPtr cacheId, ImmutableBytesWritable cachePtr, ServerCacheFactory cacheFactory) throws SQLException {
         MemoryChunk chunk = this.getMemoryManager().allocate(cachePtr.getLength());
+        boolean success = false;
         try {
             Closeable element = cacheFactory.newCache(cachePtr, chunk);
             getServerCaches().put(cacheId, element);
+            success = true;
             return element;
-        } catch (SQLException e) {
-            chunk.close();
-            throw e;
-        } catch (RuntimeException e) {
-            chunk.close();
-            throw e;
-        }
+        } finally {
+            if (!success) {
+                Closeables.closeAllQuietly(Collections.singletonList(chunk));
+            }
+        }           
     }
     
     @Override
