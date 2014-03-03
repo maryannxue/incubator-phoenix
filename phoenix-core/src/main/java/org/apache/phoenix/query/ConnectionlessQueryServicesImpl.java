@@ -52,8 +52,11 @@ import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PIndexState;
 import org.apache.phoenix.schema.PMetaData;
 import org.apache.phoenix.schema.PMetaDataImpl;
+import org.apache.phoenix.schema.PName;
+import org.apache.phoenix.schema.PNameFactory;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTableImpl;
+import org.apache.phoenix.schema.PTableKey;
 import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.Sequence;
 import org.apache.phoenix.schema.SequenceAlreadyExistsException;
@@ -83,10 +86,16 @@ public class ConnectionlessQueryServicesImpl extends DelegateQueryServices imple
     
     public ConnectionlessQueryServicesImpl(QueryServices queryServices) {
         super(queryServices);
-        metaData = PMetaDataImpl.EMPTY_META_DATA;
+        metaData = newEmptyMetaData();
         // find the HBase version and use that to determine the KeyValueBuilder that should be used
         String hbaseVersion = VersionInfo.getVersion();
         this.kvBuilder = KeyValueBuilder.get(hbaseVersion);
+    }
+
+    private PMetaData newEmptyMetaData() {
+        long maxSizeBytes = getProps().getLong(QueryServices.MAX_CLIENT_METADATA_CACHE_SIZE_ATTRIB,
+                QueryServicesOptions.DEFAULT_MAX_CLIENT_METADATA_CACHE_SIZE);
+        return new PMetaDataImpl(INITIAL_META_DATA_TABLE_CAPACITY, maxSizeBytes);
     }
 
     @Override
@@ -130,21 +139,21 @@ public class ConnectionlessQueryServicesImpl extends DelegateQueryServices imple
     }
 
     @Override
-    public PMetaData addColumn(String tableName, List<PColumn> columns, long tableTimeStamp, long tableSeqNum,
-            boolean isImmutableRows) throws SQLException {
-        return metaData = metaData.addColumn(tableName, columns, tableTimeStamp, tableSeqNum, isImmutableRows);
+    public PMetaData addColumn(PName tenantId, String tableName, List<PColumn> columns, long tableTimeStamp,
+            long tableSeqNum, boolean isImmutableRows) throws SQLException {
+        return metaData = metaData.addColumn(tenantId, tableName, columns, tableTimeStamp, tableSeqNum, isImmutableRows);
     }
 
     @Override
-    public PMetaData removeTable(String tableName)
+    public PMetaData removeTable(PName tenantId, String tableName)
             throws SQLException {
-        return metaData = metaData.removeTable(tableName);
+        return metaData = metaData.removeTable(tenantId, tableName);
     }
 
     @Override
-    public PMetaData removeColumn(String tableName, String familyName, String columnName, long tableTimeStamp,
-            long tableSeqNum) throws SQLException {
-        return metaData = metaData.removeColumn(tableName, familyName, columnName, tableTimeStamp, tableSeqNum);
+    public PMetaData removeColumn(PName tenantId, String tableName, String familyName, String columnName,
+            long tableTimeStamp, long tableSeqNum) throws SQLException {
+        return metaData = metaData.removeColumn(tenantId, tableName, familyName, columnName, tableTimeStamp, tableSeqNum);
     }
 
     
@@ -154,11 +163,12 @@ public class ConnectionlessQueryServicesImpl extends DelegateQueryServices imple
     }
 
     @Override
-    public MetaDataMutationResult getTable(byte[] tenantId, byte[] schemaBytes, byte[] tableBytes, long tableTimestamp, long clientTimestamp) throws SQLException {
+    public MetaDataMutationResult getTable(PName tenantId, byte[] schemaBytes, byte[] tableBytes, long tableTimestamp, long clientTimestamp) throws SQLException {
         // Return result that will cause client to use it's own metadata instead of needing
         // to get anything from the server (since we don't have a connection)
         try {
-            PTable table = metaData.getTable(SchemaUtil.getTableName(schemaBytes, tableBytes));
+            String fullTableName = SchemaUtil.getTableName(schemaBytes, tableBytes);
+            PTable table = metaData.getTable(new PTableKey(tenantId, fullTableName));
             return new MetaDataMutationResult(MutationCode.TABLE_ALREADY_EXISTS, 0, table);
         } catch (TableNotFoundException e) {
             return new MetaDataMutationResult(MutationCode.TABLE_NOT_FOUND, 0, null);
@@ -190,7 +200,7 @@ public class ConnectionlessQueryServicesImpl extends DelegateQueryServices imple
     public void init(String url, Properties props) throws SQLException {
         props = new Properties(props);
         props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(MetaDataProtocol.MIN_SYSTEM_TABLE_TIMESTAMP));
-        PhoenixConnection metaConnection = new PhoenixConnection(this, url, props, PMetaDataImpl.EMPTY_META_DATA);
+        PhoenixConnection metaConnection = new PhoenixConnection(this, url, props, newEmptyMetaData());
         SQLException sqlE = null;
         try {
             try {
@@ -244,10 +254,12 @@ public class ConnectionlessQueryServicesImpl extends DelegateQueryServices imple
         SchemaUtil.getVarChars(tableMetadata.get(0).getRow(), rowKeyMetadata);
         KeyValue newKV = tableMetadata.get(0).getFamilyMap().get(TABLE_FAMILY_BYTES).get(0);
         PIndexState newState =  PIndexState.fromSerializedValue(newKV.getBuffer()[newKV.getValueOffset()]);
+        byte[] tenantIdBytes = rowKeyMetadata[PhoenixDatabaseMetaData.TENANT_ID_INDEX];
         String schemaName = Bytes.toString(rowKeyMetadata[PhoenixDatabaseMetaData.SCHEMA_NAME_INDEX]);
         String indexName = Bytes.toString(rowKeyMetadata[PhoenixDatabaseMetaData.TABLE_NAME_INDEX]);
         String indexTableName = SchemaUtil.getTableName(schemaName, indexName);
-        PTable index = metaData.getTable(indexTableName);
+        PName tenantId = tenantIdBytes.length == 0 ? null : PNameFactory.newName(tenantIdBytes);
+        PTable index = metaData.getTable(new PTableKey(tenantId, indexTableName));
         index = PTableImpl.makePTable(index,newState == PIndexState.USABLE ? PIndexState.ACTIVE : newState == PIndexState.UNUSABLE ? PIndexState.INACTIVE : newState);
         return new MetaDataMutationResult(MutationCode.TABLE_ALREADY_EXISTS, 0, index);
     }

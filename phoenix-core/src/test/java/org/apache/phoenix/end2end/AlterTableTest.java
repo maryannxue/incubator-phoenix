@@ -42,7 +42,9 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.query.QueryConstants;
+import org.apache.phoenix.schema.PTableKey;
 import org.apache.phoenix.schema.TableNotFoundException;
+import org.apache.phoenix.util.IndexUtil;
 import org.apache.phoenix.util.SchemaUtil;
 import org.junit.Test;
 
@@ -344,8 +346,26 @@ public class AlterTableTest extends BaseHBaseManagedTimeTest {
         conn.commit();
         
         assertIndexExists(conn,true);
-        conn.createStatement().execute("ALTER TABLE " + DATA_TABLE_FULL_NAME + " ADD k2 DECIMAL PRIMARY KEY");
-        // TODO: verify metadata of index
+        conn.createStatement().execute("ALTER TABLE " + DATA_TABLE_FULL_NAME + " ADD v3 VARCHAR, k2 DECIMAL PRIMARY KEY");
+        rs = conn.getMetaData().getPrimaryKeys("", SCHEMA_NAME, DATA_TABLE_NAME);
+        assertTrue(rs.next());
+        assertEquals("K",rs.getString("COLUMN_NAME"));
+        assertEquals(1, rs.getShort("KEY_SEQ"));
+        assertTrue(rs.next());
+        assertEquals("K2",rs.getString("COLUMN_NAME"));
+        assertEquals(2, rs.getShort("KEY_SEQ"));
+
+        rs = conn.getMetaData().getPrimaryKeys("", SCHEMA_NAME, INDEX_TABLE_NAME);
+        assertTrue(rs.next());
+        assertEquals(QueryConstants.DEFAULT_COLUMN_FAMILY + IndexUtil.INDEX_COLUMN_NAME_SEP + "V1",rs.getString("COLUMN_NAME"));
+        assertEquals(1, rs.getShort("KEY_SEQ"));
+        assertTrue(rs.next());
+        assertEquals(IndexUtil.INDEX_COLUMN_NAME_SEP + "K",rs.getString("COLUMN_NAME"));
+        assertEquals(2, rs.getShort("KEY_SEQ"));
+        assertTrue(rs.next());
+        assertEquals(IndexUtil.INDEX_COLUMN_NAME_SEP + "K2",rs.getString("COLUMN_NAME"));
+        assertEquals(3, rs.getShort("KEY_SEQ"));
+        
         assertIndexExists(conn,true);
         
         query = "SELECT * FROM " + DATA_TABLE_FULL_NAME;
@@ -601,9 +621,15 @@ public class AlterTableTest extends BaseHBaseManagedTimeTest {
         }
     }
 
+    private void asssertIsWALDisabled(Connection conn, String fullTableName, boolean expectedValue) throws SQLException {
+        PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+        assertEquals(expectedValue, pconn.getMetaDataCache().getTable(new PTableKey(pconn.getTenantId(), fullTableName)).isWALDisabled());
+    }
+    
     @Test
     public void testDisableWAL() throws Exception {
-
+        String fullTableName = "TEST_TABLE";
+        String fullIndexName = "I";
         Properties props = new Properties(TEST_PROPERTIES);
         Connection conn = DriverManager.getConnection(getUrl(), props);
 
@@ -618,18 +644,18 @@ public class AlterTableTest extends BaseHBaseManagedTimeTest {
             String query = "SELECT * FROM test_table";
             ResultSet rs = conn2.createStatement().executeQuery(query);
             assertFalse(rs.next());
-            assertTrue(conn2.unwrap(PhoenixConnection.class).getPMetaData().getTable("TEST_TABLE").isWALDisabled());
+            asssertIsWALDisabled(conn2,fullTableName, true);
             conn2.close();
-            assertTrue(conn.unwrap(PhoenixConnection.class).getPMetaData().getTable("TEST_TABLE").isWALDisabled());
+            asssertIsWALDisabled(conn,fullTableName, true);
 
             conn.createStatement().execute("CREATE INDEX i ON test_table (col1) include (cf1.col2) SALT_BUCKETS=4");
             conn2 = DriverManager.getConnection(getUrl(), props);
             query = "SELECT * FROM i";
             rs = conn2.createStatement().executeQuery(query);
-            assertTrue(conn2.unwrap(PhoenixConnection.class).getPMetaData().getTable("I").isWALDisabled());
+            asssertIsWALDisabled(conn2,fullIndexName, true);
             assertFalse(rs.next());
             conn2.close();
-            assertTrue(conn.unwrap(PhoenixConnection.class).getPMetaData().getTable("I").isWALDisabled());
+            asssertIsWALDisabled(conn,fullIndexName, true);
             
             conn.createStatement().execute("DROP TABLE test_table");
         } finally {
@@ -648,18 +674,18 @@ public class AlterTableTest extends BaseHBaseManagedTimeTest {
             String query = "SELECT * FROM test_table";
             ResultSet rs = conn2.createStatement().executeQuery(query);
             assertFalse(rs.next());
-            assertFalse(conn2.unwrap(PhoenixConnection.class).getPMetaData().getTable("TEST_TABLE").isWALDisabled());
+            asssertIsWALDisabled(conn,fullTableName, false);
             conn2.close();
-            assertFalse(conn.unwrap(PhoenixConnection.class).getPMetaData().getTable("TEST_TABLE").isWALDisabled());
+            asssertIsWALDisabled(conn,fullTableName, false);
 
             conn.createStatement().execute("CREATE INDEX i ON test_table (col1) include (cf1.col2) SALT_BUCKETS=4");
             conn2 = DriverManager.getConnection(getUrl(), props);
             query = "SELECT * FROM i";
             rs = conn2.createStatement().executeQuery(query);
-            assertTrue(conn2.unwrap(PhoenixConnection.class).getPMetaData().getTable("I").isWALDisabled());
+            asssertIsWALDisabled(conn2,fullIndexName, true);
             assertFalse(rs.next());
             conn2.close();
-            assertTrue(conn.unwrap(PhoenixConnection.class).getPMetaData().getTable("I").isWALDisabled());
+            asssertIsWALDisabled(conn,fullIndexName, true);
             conn.createStatement().execute("DROP TABLE test_table");
         } finally {
             conn.close();
@@ -677,18 +703,18 @@ public class AlterTableTest extends BaseHBaseManagedTimeTest {
             String query = "SELECT * FROM test_table";
             ResultSet rs = conn2.createStatement().executeQuery(query);
             assertFalse(rs.next());
-            assertFalse(conn2.unwrap(PhoenixConnection.class).getPMetaData().getTable("TEST_TABLE").isWALDisabled());
+            asssertIsWALDisabled(conn2,fullTableName, false);
             conn2.close();
-            assertFalse(conn.unwrap(PhoenixConnection.class).getPMetaData().getTable("TEST_TABLE").isWALDisabled());
+            asssertIsWALDisabled(conn,fullTableName, false);
 
             conn.createStatement().execute("CREATE INDEX i ON test_table (col1) include (cf1.col2) SALT_BUCKETS=4");
             conn2 = DriverManager.getConnection(getUrl(), props);
             query = "SELECT * FROM i";
             rs = conn2.createStatement().executeQuery(query);
-            assertFalse(conn2.unwrap(PhoenixConnection.class).getPMetaData().getTable("I").isWALDisabled());
+            asssertIsWALDisabled(conn2,fullIndexName, false);
             assertFalse(rs.next());
             conn2.close();
-            assertFalse(conn.unwrap(PhoenixConnection.class).getPMetaData().getTable("I").isWALDisabled());
+            asssertIsWALDisabled(conn,fullIndexName, false);
             
         } finally {
             conn.close();

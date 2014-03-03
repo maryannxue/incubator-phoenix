@@ -34,6 +34,7 @@ import org.apache.phoenix.compile.MutationPlan;
 import org.apache.phoenix.coprocessor.MetaDataProtocol.MetaDataMutationResult;
 import org.apache.phoenix.execute.MutationState;
 import org.apache.phoenix.jdbc.PhoenixConnection;
+import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.Sequence;
@@ -41,6 +42,8 @@ import org.apache.phoenix.schema.SequenceKey;
 
 
 public interface ConnectionQueryServices extends QueryServices, MetaDataMutated {
+    public static final int INITIAL_META_DATA_TABLE_CAPACITY = 100;
+
     /**
      * Get (and create if necessary) a child QueryService for a given tenantId.
      * The QueryService will be cached for the lifetime of the parent QueryService
@@ -66,7 +69,7 @@ public interface ConnectionQueryServices extends QueryServices, MetaDataMutated 
 
     public PhoenixConnection connect(String url, Properties info) throws SQLException;
 
-    public MetaDataMutationResult getTable(byte[] tenantId, byte[] schemaName, byte[] tableName, long tableTimestamp, long clientTimetamp) throws SQLException;
+    public MetaDataMutationResult getTable(PName tenantId, byte[] schemaName, byte[] tableName, long tableTimestamp, long clientTimetamp) throws SQLException;
     public MetaDataMutationResult createTable(List<Mutation> tableMetaData, byte[] tableName, PTableType tableType, Map<String,Object> tableProps, List<Pair<byte[],Map<String,Object>>> families, byte[][] splits) throws SQLException;
     public MetaDataMutationResult dropTable(List<Mutation> tableMetadata, PTableType tableType) throws SQLException;
     public MetaDataMutationResult addColumn(List<Mutation> tableMetaData, List<Pair<byte[],Map<String,Object>>> families, PTable table) throws SQLException;

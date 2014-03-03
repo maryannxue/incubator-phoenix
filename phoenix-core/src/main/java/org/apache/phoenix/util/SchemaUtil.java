@@ -17,7 +17,7 @@
  */
 package org.apache.phoenix.util;
 
-import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.TYPE_TABLE_NAME_BYTES;
+import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CATALOG_BYTES;
 
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -38,7 +38,6 @@ import org.apache.phoenix.query.KeyRange;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.schema.AmbiguousColumnException;
 import org.apache.phoenix.schema.ColumnFamilyNotFoundException;
-import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.ColumnNotFoundException;
 import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PColumnFamily;
@@ -50,6 +49,7 @@ import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.RowKeySchema;
 import org.apache.phoenix.schema.RowKeySchema.RowKeySchemaBuilder;
 import org.apache.phoenix.schema.SaltingUtil;
+import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.ValueSchema.Field;
 
 
@@ -345,7 +345,7 @@ public class SchemaUtil {
     }
 
     public static boolean isMetaTable(byte[] tableName) {
-        return Bytes.compareTo(tableName, TYPE_TABLE_NAME_BYTES) == 0;
+        return Bytes.compareTo(tableName, SYSTEM_CATALOG_BYTES) == 0;
     }
     
     public static boolean isSequenceTable(byte[] tableName) {
@@ -353,15 +353,15 @@ public class SchemaUtil {
     }
 
     public static boolean isMetaTable(PTable table) {
-        return PhoenixDatabaseMetaData.TYPE_SCHEMA.equals(table.getSchemaName().getString()) && PhoenixDatabaseMetaData.TYPE_TABLE.equals(table.getTableName().getString());
+        return PhoenixDatabaseMetaData.SYSTEM_CATALOG_SCHEMA.equals(table.getSchemaName().getString()) && PhoenixDatabaseMetaData.SYSTEM_CATALOG_TABLE.equals(table.getTableName().getString());
     }
     
     public static boolean isMetaTable(byte[] schemaName, byte[] tableName) {
-        return Bytes.compareTo(schemaName, PhoenixDatabaseMetaData.TYPE_SCHEMA_BYTES) == 0 && Bytes.compareTo(tableName, PhoenixDatabaseMetaData.TYPE_TABLE_BYTES) == 0;
+        return Bytes.compareTo(schemaName, PhoenixDatabaseMetaData.SYSTEM_CATALOG_TABLE_BYTES) == 0 && Bytes.compareTo(tableName, PhoenixDatabaseMetaData.SYSTEM_CATALOG_SCHEMA_BYTES) == 0;
     }
     
     public static boolean isMetaTable(String schemaName, String tableName) {
-        return PhoenixDatabaseMetaData.TYPE_SCHEMA.equals(schemaName) && PhoenixDatabaseMetaData.TYPE_TABLE.equals(tableName);
+        return PhoenixDatabaseMetaData.SYSTEM_CATALOG_SCHEMA.equals(schemaName) && PhoenixDatabaseMetaData.SYSTEM_CATALOG_TABLE.equals(tableName);
     }
 
     // Given the splits and the rowKeySchema, find out the keys that 
@@ -452,7 +452,7 @@ public class SchemaUtil {
     protected static PhoenixConnection addMetaDataColumn(PhoenixConnection conn, long scn, String columnDef) throws SQLException {
         String url = conn.getURL();
         Properties props = conn.getClientInfo();
-        PMetaData metaData = conn.getPMetaData();
+        PMetaData metaData = conn.getMetaDataCache();
         props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(scn));
         PhoenixConnection metaConnection = null;
 
@@ -539,5 +539,19 @@ public class SchemaUtil {
             maxKeyLength += maxSlotLength;
         }
         return maxKeyLength;
+    }
+
+    public static short getMaxKeySeq(PTable table) {
+        int offset = 0;
+        if (table.getBucketNum() != null) {
+            offset++;
+        }
+        if (table.isMultiTenant()) {
+            offset++;
+        }
+        if (table.getViewIndexId() != null) {
+            offset++;
+        }
+        return (short)(table.getPKColumns().size() - offset);
     }
 }
