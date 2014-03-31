@@ -397,8 +397,16 @@ public class ParseNodeFactory {
         return new IsNullParseNode(child, negate);
     }
 
-    public JoinTableNode join (JoinType type, ParseNode on, TableNode table) {
-        return new JoinTableNode(type, on, table);
+    public TableNode table(TableNode table, List<Pair<Pair<JoinTableNode.JoinType, ParseNode>,TableNode>> parts) {
+        for (Pair<Pair<JoinTableNode.JoinType, ParseNode>,TableNode> part : parts) {
+            table = new JoinTableNode(part.getFirst().getFirst(), table, part.getSecond(), part.getFirst().getSecond());
+        }
+        
+        return table;
+    }
+
+    public JoinTableNode join(JoinType type, TableNode lhs, TableNode rhs, ParseNode on) {
+        return new JoinTableNode(type, lhs, rhs, on);
     }
 
     public DerivedTableNode derivedTable (String alias, SelectStatement select) {
