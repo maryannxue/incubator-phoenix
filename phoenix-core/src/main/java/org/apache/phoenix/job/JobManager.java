@@ -17,7 +17,14 @@
  */
 package org.apache.phoenix.job;
 
-import java.util.concurrent.*;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.RunnableFuture;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
@@ -56,7 +63,7 @@ public class JobManager<T> extends AbstractRoundRobinQueue<T> {
         }
         ThreadFactory threadFactory = new ThreadFactoryBuilder().setNameFormat(
 				"phoenix-" + PHOENIX_POOL_INDEX.getAndIncrement()
-						+ "-thread-%s").build();
+						+ "-thread-%s").setDaemon(true).build();
         // For thread pool, set core threads = max threads -- we don't ever want to exceed core threads, but want to go up to core threads *before* using the queue.
         ThreadPoolExecutor exec = new ThreadPoolExecutor(size, size, keepAliveMs, TimeUnit.MILLISECONDS, queue, threadFactory) {
             @Override
@@ -67,7 +74,7 @@ public class JobManager<T> extends AbstractRoundRobinQueue<T> {
     
             @Override
             protected <T> RunnableFuture<T> newTaskFor(Runnable runnable, T value) {
-                return new JobFutureTask<T>((JobRunnable)runnable, value);
+                return new JobFutureTask<T>(runnable, value);
             }
             
         };
@@ -82,9 +89,13 @@ public class JobManager<T> extends AbstractRoundRobinQueue<T> {
     static class JobFutureTask<T> extends FutureTask<T> {
         private final Object jobId;
         
-        public JobFutureTask(JobRunnable r, T t) {
+        public JobFutureTask(Runnable r, T t) {
             super(r, t);
-            this.jobId = r.getJobId();
+            if(r instanceof JobRunnable){
+              	this.jobId = ((JobRunnable)r).getJobId();
+            } else {
+            	this.jobId = this;
+            }
         }
         
         public JobFutureTask(Callable<T> c) {

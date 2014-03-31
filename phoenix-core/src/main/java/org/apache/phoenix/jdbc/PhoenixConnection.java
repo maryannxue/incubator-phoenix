@@ -41,21 +41,17 @@ import java.sql.Savepoint;
 import java.sql.Statement;
 import java.sql.Struct;
 import java.text.Format;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.Properties;
+import java.util.*;
 import java.util.concurrent.Executor;
 
 import javax.annotation.Nullable;
 
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.phoenix.client.KeyValueBuilder;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.SQLExceptionInfo;
 import org.apache.phoenix.execute.MutationState;
 import org.apache.phoenix.expression.function.FunctionArgumentType;
+import org.apache.phoenix.hbase.index.util.KeyValueBuilder;
 import org.apache.phoenix.jdbc.PhoenixStatement.PhoenixStatementParser;
 import org.apache.phoenix.query.ConnectionQueryServices;
 import org.apache.phoenix.query.DelegateConnectionQueryServices;
@@ -119,7 +115,7 @@ public class PhoenixConnection implements Connection, org.apache.phoenix.jdbc.Jd
         props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(scn));
         return props;
     }
-    
+
     public PhoenixConnection(PhoenixConnection connection) throws SQLException {
         this(connection.getQueryServices(), connection.getURL(), connection.getClientInfo(), connection.getMetaDataCache());
         this.isAutoCommit = connection.isAutoCommit;
@@ -172,6 +168,10 @@ public class PhoenixConnection implements Connection, org.apache.phoenix.jdbc.Jd
         Format dateTimeFormat = DateUtil.getDateFormatter(datePattern);
         formatters[PDataType.DATE.ordinal()] = dateTimeFormat;
         formatters[PDataType.TIME.ordinal()] = dateTimeFormat;
+        formatters[PDataType.TIMESTAMP.ordinal()] = dateTimeFormat;
+        formatters[PDataType.UNSIGNED_DATE.ordinal()] = dateTimeFormat;
+        formatters[PDataType.UNSIGNED_TIME.ordinal()] = dateTimeFormat;
+        formatters[PDataType.UNSIGNED_TIMESTAMP.ordinal()] = dateTimeFormat;
         formatters[PDataType.DECIMAL.ordinal()] = FunctionArgumentType.NUMERIC.getFormatter(numberPattern);
         // We do not limit the metaData on a connection less than the global one,
         // as there's not much that will be cached here.

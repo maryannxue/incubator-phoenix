@@ -50,16 +50,6 @@ public class DelegateColumn extends DelegateDatum implements PColumn {
     }
 
     @Override
-    public void readFields(DataInput input) throws IOException {
-        getDelegate().readFields(input);
-    }
-
-    @Override
-    public void write(DataOutput output) throws IOException {
-        getDelegate().write(output);
-    }
-
-    @Override
     public int getPosition() {
         return getDelegate().getPosition();
     }
@@ -77,5 +67,10 @@ public class DelegateColumn extends DelegateDatum implements PColumn {
     @Override
     public int getEstimatedSize() {
         return SizedUtil.OBJECT_SIZE + getDelegate().getEstimatedSize();
+    }
+
+    @Override
+    public boolean isViewReferenced() {
+        return getDelegate().isViewReferenced();
     }
 }

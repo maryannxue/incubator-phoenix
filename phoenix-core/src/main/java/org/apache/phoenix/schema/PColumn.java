@@ -17,15 +17,13 @@
  */
 package org.apache.phoenix.schema;
 
-import org.apache.hadoop.io.Writable;
-
 /**
  * Definition of a Phoenix column
  *
  * 
  * @since 0.1
  */
-public interface PColumn extends PDatum, Writable {
+public interface PColumn extends PDatum {
 
     /**
      * @return the name of the column qualifier
@@ -48,6 +46,8 @@ public interface PColumn extends PDatum, Writable {
     Integer getArraySize();
     
     byte[] getViewConstant();
+    
+    boolean isViewReferenced();
     
     int getEstimatedSize();
 }

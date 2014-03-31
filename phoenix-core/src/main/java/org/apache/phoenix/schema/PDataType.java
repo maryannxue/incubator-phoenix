@@ -31,6 +31,7 @@ import java.util.Map;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.util.Base64;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.phoenix.exception.ValueTypeIncompatibleException;
 import org.apache.phoenix.query.KeyRange;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.util.ByteUtil;
@@ -39,6 +40,7 @@ import org.apache.phoenix.util.NumberUtil;
 import org.apache.phoenix.util.StringUtil;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.math.LongMath;
 import com.google.common.primitives.Booleans;
@@ -79,11 +81,18 @@ public enum PDataType {
         }
 
         @Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
+        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (!actualType.isCoercibleTo(this)) {
                 throw new ConstraintViolationException(actualType + " cannot be coerced to " + this);
             }
-            return length == 0 ? null : Bytes.toString(bytes, offset, length);
+            if (length == 0) {
+                return null;
+            }
+            if (sortOrder == SortOrder.DESC) {
+                bytes = SortOrder.invert(bytes, offset, length);
+                offset = 0;
+            }
+            return Bytes.toString(bytes, offset, length);
         }
 
         @Override
@@ -94,13 +103,12 @@ public enum PDataType {
                 String s = (String)object;
                 return s == null || s.length() > 0 ? s : null;
             default:
-                return super.toObject(object, actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
 
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            // TODO: should CHAR not be here?
             return this == targetType || targetType == CHAR || targetType == VARBINARY || targetType == BINARY;
         }
 
@@ -116,9 +124,9 @@ public enum PDataType {
         }
 
         @Override
-        public boolean isSizeCompatible(PDataType srcType, Object value, byte[] b,
-                Integer maxLength, Integer desiredMaxLength, Integer scale, Integer desiredScale) {
-            if (srcType == PDataType.CHAR && maxLength != null && desiredMaxLength != null) {
+        public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value, PDataType srcType,
+                Integer maxLength, Integer scale, Integer desiredMaxLength, Integer desiredScale) {
+            if (ptr.getLength() != 0 && maxLength != null && desiredMaxLength != null) {
                 return maxLength <= desiredMaxLength;
             }
             return true;
@@ -172,6 +180,21 @@ public enum PDataType {
      */
     CHAR("CHAR", Types.CHAR, String.class, null) { // Delegate to VARCHAR
         @Override
+        public Object pad(Object object, int maxLength) {
+            String s = (String) object;
+            if (s == null) {
+                return s;
+            }
+            if (s.length() == maxLength) {
+                return object;
+            }
+            if (s.length() > maxLength) {
+                throw new ValueTypeIncompatibleException(this,maxLength,null);
+            }
+            return Strings.padEnd(s, maxLength, ' ');
+        }
+        
+        @Override
         public byte[] toBytes(Object object) {
             if (object == null) {
                 throw new ConstraintViolationException(this + " may not be null");
@@ -196,14 +219,19 @@ public enum PDataType {
         }
 
         @Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
+        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (!actualType.isCoercibleTo(this)) { // TODO: have isCoercibleTo that takes bytes, offset?
                 throw new ConstraintViolationException(actualType + " cannot be coerced to " + this);
             }
             if (length == 0) {
                 return null;
             }
-            length = StringUtil.getUnpaddedCharLength(bytes, offset, length, SortOrder.getDefault());
+            length = StringUtil.getUnpaddedCharLength(bytes, offset, length, sortOrder);
+            if (sortOrder == SortOrder.DESC) {
+                bytes = SortOrder.invert(bytes, offset, length);
+                offset = 0;
+            }
+            // TODO: UTF-8 decoder that will invert as it decodes
             String s = Bytes.toString(bytes, offset, length);
             if (length != s.length()) {
                throw new IllegalDataException("CHAR types may only contain single byte characters (" + s + ")");
@@ -219,7 +247,7 @@ public enum PDataType {
                 String s = (String)object;
                 return s == null || s.length() > 0 ? s : null;
             default:
-                return super.toObject(object, actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
 
@@ -229,13 +257,19 @@ public enum PDataType {
         }
 
         @Override
-        public boolean isSizeCompatible(PDataType srcType, Object value, byte[] b,
-                Integer maxLength, Integer desiredMaxLength, Integer scale, Integer desiredScale) {
-            if ((srcType == PDataType.VARCHAR && ((String)value).length() != b.length) ||
-                    (maxLength != null && desiredMaxLength != null && maxLength > desiredMaxLength)){
-                return false;
+        public void coerceBytes(ImmutableBytesWritable ptr, Object o, PDataType actualType, 
+                Integer actualMaxLength, Integer actualScale, SortOrder actualModifier,
+                Integer desiredMaxLength, Integer desiredScale, SortOrder expectedModifier) {
+            if (o != null && actualType == PDataType.VARCHAR && ((String)o).length() != ptr.getLength()) {
+                throw new IllegalDataException("CHAR types may only contain single byte characters (" + o + ")");
             }
-            return true;
+            super.coerceBytes(ptr, o, actualType, actualMaxLength, actualScale, actualModifier, desiredMaxLength, desiredScale, expectedModifier);
+        }
+        
+        @Override
+        public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value, PDataType srcType,
+                Integer maxLength, Integer scale, Integer desiredMaxLength, Integer desiredScale) {
+            return VARCHAR.isSizeCompatible(ptr, value, srcType, maxLength, scale, desiredMaxLength, desiredScale);
         }
 
         @Override
@@ -295,6 +329,10 @@ public enum PDataType {
         }
     },
     LONG("BIGINT", Types.BIGINT, Long.class, new LongCodec()) {
+        @Override
+        public Integer getScale(Object o) {
+            return ZERO;
+        }
 
         @Override
         public byte[] toBytes(Object object) {
@@ -351,24 +389,13 @@ public enum PDataType {
             case DECIMAL:
                 BigDecimal d = (BigDecimal)object;
                 return d.longValueExact();
-            case VARBINARY:
-            case BINARY:
-                byte[] o = (byte[]) object;
-                if (o.length == Bytes.SIZEOF_LONG) {
-                    return Bytes.toLong(o);
-                } else if (o.length == Bytes.SIZEOF_INT) {
-                    int iv = Bytes.toInt(o);
-                    return (long) iv;
-                } else {
-                    throw new IllegalDataException("Bytes passed doesn't represent an integer.");
-                }
             default:
-                return super.toObject(object, actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
+        public Long toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (l == 0) {
                 return null;
             }
@@ -379,16 +406,19 @@ public enum PDataType {
             case UNSIGNED_INT:
             case SMALLINT:
             case UNSIGNED_SMALLINT:
-            case UNSIGNED_TINYINT:
             case TINYINT:
-            case UNSIGNED_FLOAT:
+            case UNSIGNED_TINYINT:
             case FLOAT:
-            case UNSIGNED_DOUBLE:
+            case UNSIGNED_FLOAT:
             case DOUBLE:
-                return actualType.getCodec().decodeLong(b, o, SortOrder.getDefault());
-            default:
-                return super.toObject(b,o,l,actualType);
+            case UNSIGNED_DOUBLE:
+                return actualType.getCodec().decodeLong(b, o, sortOrder);
+            case DECIMAL:
+                BigDecimal bd = (BigDecimal)actualType.toObject(b, o, l, actualType, sortOrder);
+                return bd.longValueExact();
             }
+            throwConstraintViolationException(actualType,this);
+            return null;
         }
 
         @Override
@@ -398,7 +428,7 @@ public enum PDataType {
             // exception if we overflow
             return this == targetType || targetType == DECIMAL
                     || targetType == VARBINARY || targetType == BINARY
-                    || targetType == FLOAT || targetType == DOUBLE;
+                    || targetType == DOUBLE;
         }
 
         @Override
@@ -457,11 +487,6 @@ public enum PDataType {
         }
 
         @Override
-        public Integer getScale(Object o) {
-            return ZERO;
-        }
-
-        @Override
         public int compareTo(Object lhs, Object rhs, PDataType rhsType) {
             if (rhsType == DECIMAL) {
                 return -((BigDecimal)rhs).compareTo(BigDecimal.valueOf(((Number)lhs).longValue()));
@@ -484,6 +509,10 @@ public enum PDataType {
         }
     },
     INTEGER("INTEGER", Types.INTEGER, Integer.class, new IntCodec()) {
+        @Override
+        public Integer getScale(Object o) {
+            return ZERO;
+        }
     	
         @Override
         public byte[] toBytes(Object object) {
@@ -515,7 +544,7 @@ public enum PDataType {
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
+        public Integer toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (l == 0) {
                 return null;
             }
@@ -532,10 +561,13 @@ public enum PDataType {
             case UNSIGNED_FLOAT:
             case DOUBLE:
             case UNSIGNED_DOUBLE:
-                return actualType.getCodec().decodeInt(b, o, SortOrder.getDefault());
-            default:
-                return super.toObject(b,o,l,actualType);
+                return actualType.getCodec().decodeInt(b, o, sortOrder);
+            case DECIMAL:
+                BigDecimal bd = (BigDecimal)actualType.toObject(b, o, l, actualType, sortOrder);
+                return bd.intValueExact();
             }
+            throwConstraintViolationException(actualType,this);
+            return null;
         }
 
         @Override
@@ -569,7 +601,7 @@ public enum PDataType {
 
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || LONG.isCoercibleTo(targetType);
+            return this == targetType || targetType == FLOAT || LONG.isCoercibleTo(targetType);
         }
 
         @Override
@@ -585,11 +617,6 @@ public enum PDataType {
         @Override
         public Integer getMaxLength(Object o) {
             return INT_PRECISION;
-        }
-
-        @Override
-        public Integer getScale(Object o) {
-            return ZERO;
         }
 
         @Override
@@ -615,6 +642,10 @@ public enum PDataType {
         }
     },
     SMALLINT("SMALLINT", Types.SMALLINT, Short.class, new ShortCodec()){
+        @Override
+        public Integer getScale(Object o) {
+            return ZERO;
+        }
 
       @Override
       public int compareTo(Object lhs, Object rhs, PDataType rhsType) {
@@ -636,11 +667,6 @@ public enum PDataType {
         return Bytes.SIZEOF_SHORT;
       }
 
-      @Override
-      public Integer getScale(Object o) {
-          return ZERO;
-      }
-      
       @Override
       public Integer getMaxLength(Object o) {
           return SHORT_PRECISION;
@@ -676,7 +702,7 @@ public enum PDataType {
       }
 
       @Override
-      public Object toObject(byte[] b, int o, int l, PDataType actualType) {
+      public Short toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
           if (l == 0) {
               return null;
           }
@@ -693,10 +719,13 @@ public enum PDataType {
           case UNSIGNED_FLOAT:
           case DOUBLE:
           case UNSIGNED_DOUBLE:
-              return actualType.getCodec().decodeShort(b, o, SortOrder.getDefault());
-          default:
-              return super.toObject(b,o,l,actualType);
+              return actualType.getCodec().decodeShort(b, o, sortOrder);
+          case DECIMAL:
+              BigDecimal bd = (BigDecimal)actualType.toObject(b, o, l, actualType, sortOrder);
+              return bd.shortValueExact();
           }
+          throwConstraintViolationException(actualType,this);
+          return null;
       }
 
       @Override
@@ -742,6 +771,10 @@ public enum PDataType {
       
     },
     TINYINT("TINYINT", Types.TINYINT, Byte.class, new ByteCodec()) {
+        @Override
+        public Integer getScale(Object o) {
+            return ZERO;
+        }
 
       @Override
       public int compareTo(Object lhs, Object rhs, PDataType rhsType) {
@@ -761,11 +794,6 @@ public enum PDataType {
       @Override
       public Integer getByteSize() {
         return Bytes.SIZEOF_BYTE;
-      }
-      
-      @Override
-      public Integer getScale(Object o) {
-          return ZERO;
       }
       
       @Override
@@ -815,7 +843,7 @@ public enum PDataType {
       }
       
       @Override
-      public Object toObject(byte[] b, int o, int l, PDataType actualType) {
+      public Byte toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
           if (l == 0) {
               return null;
           }
@@ -832,10 +860,13 @@ public enum PDataType {
           case SMALLINT:
           case UNSIGNED_TINYINT:
           case TINYINT:
-              return actualType.getCodec().decodeByte(b, o, SortOrder.getDefault());
-          default:
-              return super.toObject(b,o,l,actualType);
+              return actualType.getCodec().decodeByte(b, o, sortOrder);
+          case DECIMAL:
+              BigDecimal bd = (BigDecimal)actualType.toObject(b, o, l, actualType, sortOrder);
+              return bd.byteValueExact();
           }
+          throwConstraintViolationException(actualType,this);
+          return null;
       }
       
       @Override
@@ -877,7 +908,7 @@ public enum PDataType {
 
         @Override
         public Integer getByteSize() {
-            return Bytes.SIZEOF_INT;
+            return Bytes.SIZEOF_FLOAT;
         }
         
         @Override
@@ -887,7 +918,7 @@ public enum PDataType {
             }
             Float v = (Float) o;
             BigDecimal bd = BigDecimal.valueOf(v);
-            return bd.scale();
+            return bd.scale() == 0 ? null : bd.scale();
         }
         
         @Override
@@ -902,7 +933,7 @@ public enum PDataType {
 
         @Override
         public byte[] toBytes(Object object) {
-            byte[] b = new byte[Bytes.SIZEOF_INT];
+            byte[] b = new byte[Bytes.SIZEOF_FLOAT];
             toBytes(object, b, 0);
             return b;
         }
@@ -968,12 +999,12 @@ public enum PDataType {
                 BigDecimal dl = (BigDecimal)object;
                 return dl.floatValue();
             default:
-                return super.toObject(object, actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
         
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
+        public Float toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (l <= 0) {
                 return null;
             }
@@ -990,10 +1021,14 @@ public enum PDataType {
             case SMALLINT:
             case UNSIGNED_TINYINT:
             case TINYINT:
-                return actualType.getCodec().decodeFloat(b, o, SortOrder.getDefault());
-            default:
-                return super.toObject(b,o,l,actualType);
+                return actualType.getCodec().decodeFloat(b, o, sortOrder);
+            case DECIMAL:
+                BigDecimal bd = (BigDecimal)actualType.toObject(b, o, l, actualType, sortOrder);
+                return bd.floatValue();
             }
+            
+            throwConstraintViolationException(actualType,this);
+            return null;
         }
         
         @Override
@@ -1030,7 +1065,6 @@ public enum PDataType {
         public boolean isCoercibleTo(PDataType targetType) {
             return this == targetType || DOUBLE.isCoercibleTo(targetType);
         }
-        
     },
     DOUBLE("DOUBLE", Types.DOUBLE, Double.class, new DoubleCodec()) {
 
@@ -1049,7 +1083,7 @@ public enum PDataType {
 
         @Override
         public Integer getByteSize() {
-            return Bytes.SIZEOF_LONG;
+            return Bytes.SIZEOF_DOUBLE;
         }
         
         @Override
@@ -1059,7 +1093,7 @@ public enum PDataType {
             }
             Double v = (Double) o;
             BigDecimal bd = BigDecimal.valueOf(v);
-            return bd.scale();
+            return bd.scale() == 0 ? null : bd.scale();
         }
         
         @Override
@@ -1074,7 +1108,7 @@ public enum PDataType {
 
         @Override
         public byte[] toBytes(Object object) {
-            byte[] b = new byte[Bytes.SIZEOF_LONG];
+            byte[] b = new byte[Bytes.SIZEOF_DOUBLE];
             toBytes(object, b, 0);
             return b;
         }
@@ -1134,12 +1168,12 @@ public enum PDataType {
                 BigDecimal d = (BigDecimal)object;
                 return d.doubleValue();
             default:
-                return super.toObject(object, actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
         
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
+        public Double toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (l <= 0) {
                 return null;
             }
@@ -1156,10 +1190,13 @@ public enum PDataType {
             case SMALLINT:
             case UNSIGNED_TINYINT:
             case TINYINT:
-                return actualType.getCodec().decodeDouble(b, o, SortOrder.getDefault());
-            default:
-                return super.toObject(b,o,l,actualType);
+                return actualType.getCodec().decodeDouble(b, o, sortOrder);
+            case DECIMAL:
+                BigDecimal bd = (BigDecimal)actualType.toObject(b, o, l, actualType, sortOrder);
+                return bd.doubleValue();
             }
+            throwConstraintViolationException(actualType,this);
+            return null;
         }
         
         @Override
@@ -1205,7 +1242,6 @@ public enum PDataType {
             return this == targetType || targetType == DECIMAL
                     || targetType == VARBINARY || targetType == BINARY;
         }
-        
     },
     DECIMAL("DECIMAL", Types.DECIMAL, BigDecimal.class, null) {
         @Override
@@ -1262,7 +1298,7 @@ public enum PDataType {
         @Override
         public Integer getMaxLength(Object o) {
             if (o == null) {
-                return null;
+                return MAX_PRECISION;
             }
             BigDecimal v = (BigDecimal) o;
             return v.precision();
@@ -1274,48 +1310,57 @@ public enum PDataType {
                 return null;
             }
             BigDecimal v = (BigDecimal) o;
-            return v.scale();
+            int scale = v.scale();
+            if (scale == 0) {
+                return null;
+            }
+            // If we have 5.0, we still want scale to be null
+            return v.remainder(BigDecimal.ONE).compareTo(BigDecimal.ZERO) == 0 ? null : scale;
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder) {
+        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             Preconditions.checkNotNull(sortOrder);        	
             if (l == 0) {
                 return null;
             }
-            if (sortOrder == SortOrder.DESC) {
-                b = SortOrder.invert(b, o, new byte[l], 0, l);
-                o = 0;
-            }
             switch (actualType) {
             case DECIMAL:
+                if (sortOrder == SortOrder.DESC) {
+                    b = SortOrder.invert(b, o, new byte[l], 0, l);
+                    o = 0;
+                }
                 return toBigDecimal(b, o, l);
             case DATE:
             case TIME:
+            case UNSIGNED_DATE:
+            case UNSIGNED_TIME:
             case LONG:
+            case UNSIGNED_LONG:
             case INTEGER:
             case SMALLINT:
             case TINYINT:
-            case UNSIGNED_LONG:
             case UNSIGNED_INT:
             case UNSIGNED_SMALLINT:
             case UNSIGNED_TINYINT:
-                return BigDecimal.valueOf(actualType.getCodec().decodeLong(b, o, SortOrder.getDefault()));
+                return BigDecimal.valueOf(actualType.getCodec().decodeLong(b, o, sortOrder));
             case FLOAT:
             case UNSIGNED_FLOAT:
-                return BigDecimal.valueOf(actualType.getCodec().decodeFloat(b, o, SortOrder.getDefault()));
+                return BigDecimal.valueOf(actualType.getCodec().decodeFloat(b, o, sortOrder));
             case DOUBLE:
             case UNSIGNED_DOUBLE:
-                return BigDecimal.valueOf(actualType.getCodec().decodeDouble(b, o, SortOrder.getDefault()));
+                return BigDecimal.valueOf(actualType.getCodec().decodeDouble(b, o, sortOrder));
             case TIMESTAMP:
             case UNSIGNED_TIMESTAMP:
-                Timestamp ts = (Timestamp) actualType.toObject(b, o, l) ;
-                long millisPart = ts.getTime();
-                BigDecimal nanosPart = BigDecimal.valueOf((ts.getNanos() % QueryConstants.MILLIS_TO_NANOS_CONVERTOR)/QueryConstants.MILLIS_TO_NANOS_CONVERTOR);
+                long millisPart = actualType.getCodec().decodeLong(b, o, sortOrder);
+                int nanoPart = UNSIGNED_INT.getCodec().decodeInt(b, o+Bytes.SIZEOF_LONG, sortOrder);
+                BigDecimal nanosPart = BigDecimal.valueOf((nanoPart % QueryConstants.MILLIS_TO_NANOS_CONVERTOR)/QueryConstants.MILLIS_TO_NANOS_CONVERTOR);
                 BigDecimal value = BigDecimal.valueOf(millisPart).add(nanosPart);
                 return value;
+            case BOOLEAN:
+                return (Boolean)BOOLEAN.toObject(b, o, l, actualType, sortOrder) ? BigDecimal.ONE : BigDecimal.ZERO;
             default:
-                return super.toObject(b,o,l,actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
 
@@ -1345,6 +1390,12 @@ public enum PDataType {
                 return BigDecimal.valueOf((Double)object);
             case DECIMAL:
                 return object;
+            case DATE:
+            case UNSIGNED_DATE:
+            case TIME:
+            case UNSIGNED_TIME:
+                java.util.Date d = (java.util.Date)object;
+                return BigDecimal.valueOf(d.getTime());
             case TIMESTAMP:
             case UNSIGNED_TIMESTAMP:
                 Timestamp ts = (Timestamp)object;
@@ -1352,8 +1403,10 @@ public enum PDataType {
                 BigDecimal nanosPart = BigDecimal.valueOf((ts.getNanos() % QueryConstants.MILLIS_TO_NANOS_CONVERTOR)/QueryConstants.MILLIS_TO_NANOS_CONVERTOR);
                 BigDecimal value = BigDecimal.valueOf(millisPart).add(nanosPart);
                 return value;
+            case BOOLEAN:
+                return ((Boolean)object) ? BigDecimal.ONE : BigDecimal.ZERO;
             default:
-                return super.toObject(object, actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
 
@@ -1373,6 +1426,11 @@ public enum PDataType {
                 return ((BigDecimal)lhs).compareTo((BigDecimal)rhs);
             }
             return -rhsType.compareTo(rhs, lhs, this);
+        }
+
+        @Override
+        public boolean isCastableTo(PDataType targetType) {
+            return super.isCastableTo(targetType) || targetType.isCoercibleTo(TIMESTAMP) || targetType == BOOLEAN;
         }
 
         @Override
@@ -1466,23 +1524,23 @@ public enum PDataType {
         }
 
         @Override
-        public boolean isSizeCompatible(PDataType srcType, Object value, byte[] b, Integer maxLength,
-        		Integer desiredMaxLength, Integer scale, Integer desiredScale) {
-            // Get precision and scale if it is not already passed in and either the object or byte values
-            // is meaningful.
-            if (maxLength == null && scale == null) {
-                if (value != null) {
-                    BigDecimal v = (BigDecimal) value;
-                    maxLength = v.precision();
-                    scale = v.scale();
-                } else if (b != null && b.length > 0) {
-                    int[] v = getDecimalPrecisionAndScale(b, 0, b.length);
-                    maxLength = v[0];
-                    scale = v[1];
-                } else {
-                    // the value does not contains maxLength nor scale. Just return true.
-                    return true;
-                }
+        public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value, PDataType srcType, Integer maxLength,
+        		Integer scale, Integer desiredMaxLength, Integer desiredScale) {
+            if (ptr.getLength() == 0) {
+                return true;
+            }
+            // Use the scale from the value if provided, as it prevents a deserialization.
+            // The maxLength and scale for the underlying expression are ignored, because they
+            // are not relevant in this case: for example a DECIMAL(10,2) may be assigned to a
+            // DECIMAL(5,0) as long as the value fits.
+            if (value != null) {
+                BigDecimal v = (BigDecimal) value;
+                maxLength = v.precision();
+                scale = v.scale();
+            } else  {
+                int[] v = getDecimalPrecisionAndScale(ptr.get(), ptr.getOffset(), ptr.getLength());
+                maxLength = v[0];
+                scale = v[1];
             }
             if (desiredMaxLength != null && desiredScale != null && maxLength != null && scale != null &&
             		((desiredScale == null && desiredMaxLength < maxLength) || 
@@ -1493,37 +1551,39 @@ public enum PDataType {
         }
 
         @Override
-        public byte[] coerceBytes(byte[] b, Object object, PDataType actualType, Integer maxLength, Integer scale,
-                Integer desiredMaxLength, Integer desiredScale) {
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, 
+                Integer maxLength, Integer scale, SortOrder actualModifier,
+                Integer desiredMaxLength, Integer desiredScale, SortOrder expectedModifier) {
             if (desiredScale == null) {
                 // deiredScale not available, or we do not have scale requirement, delegate to parents.
-                return super.coerceBytes(b, object, actualType);
+                super.coerceBytes(ptr, object, actualType, maxLength, scale, actualModifier, desiredMaxLength, desiredScale, expectedModifier);
+                return;
+            }
+            if (ptr.getLength() == 0) {
+                return;
             }
             if (scale == null) {
                 if (object != null) {
                     BigDecimal v = (BigDecimal) object;
                     scale = v.scale();
-                } else if (b != null && b.length > 0) {
-                    int[] v = getDecimalPrecisionAndScale(b, 0, b.length);
-                    scale = v[1];
                 } else {
-                    // Neither the object value nor byte value is meaningful, delegate to super.
-                    return super.coerceBytes(b, object, actualType);
+                    int[] v = getDecimalPrecisionAndScale(ptr.get(), ptr.getOffset(), ptr.getLength());
+                    scale = v[1];
                 }
             }
             if (this == actualType && scale <= desiredScale) {
                 // No coerce and rescale necessary
-                return b;
+                return;
             } else {
                 BigDecimal decimal;
                 // Rescale is necessary.
                 if (object != null) { // value object is passed in.
                     decimal = (BigDecimal) toObject(object, actualType);
                 } else { // only value bytes is passed in, need to convert to object first.
-                    decimal = (BigDecimal) toObject(b);
+                    decimal = (BigDecimal) toObject(ptr);
                 }
                 decimal = decimal.setScale(desiredScale, BigDecimal.ROUND_DOWN);
-                return toBytes(decimal);
+                ptr.set(toBytes(decimal));
             }
         }
 
@@ -1597,26 +1657,30 @@ public enum PDataType {
             case TIMESTAMP:
             case UNSIGNED_TIMESTAMP:
                 return object;
+            case LONG:
+            case UNSIGNED_LONG:
+                return new Timestamp((Long)object);
+            case DECIMAL:
+                BigDecimal bd = (BigDecimal)object;
+                long ms = bd.longValue();
+                int nanos = (bd.remainder(BigDecimal.ONE).multiply(QueryConstants.BD_MILLIS_NANOS_CONVERSION)).intValue();
+                return DateUtil.getTimestamp(ms, nanos);
             default:
-                return super.toObject(object, actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder) {
+        public Timestamp toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (actualType == null || l == 0) {
                 return null;
-            }
-            if (sortOrder == SortOrder.DESC) {
-                b = SortOrder.invert(b, o, new byte[l], 0, l);
-                o = 0;
             }
             switch (actualType) {
             case TIMESTAMP:
             case UNSIGNED_TIMESTAMP:
-                long millisDeserialized = (actualType == TIMESTAMP ? DATE : UNSIGNED_DATE).getCodec().decodeLong(b, o, SortOrder.getDefault());
+                long millisDeserialized = (actualType == TIMESTAMP ? DATE : UNSIGNED_DATE).getCodec().decodeLong(b, o, sortOrder);
                 Timestamp v = new Timestamp(millisDeserialized);
-                int nanosDeserialized = Bytes.toInt(b, o + Bytes.SIZEOF_LONG, Bytes.SIZEOF_INT);
+                int nanosDeserialized = PDataType.UNSIGNED_INT.getCodec().decodeInt(b, o + Bytes.SIZEOF_LONG, sortOrder);
                 /*
                  * There was a bug in serialization of timestamps which was causing the sub-second millis part
                  * of time stamp to be present both in the LONG and INT bytes. Having the <100000 check
@@ -1626,18 +1690,20 @@ public enum PDataType {
                 return v;
             case DATE:
             case TIME:
+            case LONG:
+            case UNSIGNED_LONG:
             case UNSIGNED_DATE:
             case UNSIGNED_TIME:
-                return new Timestamp(actualType.getCodec().decodeLong(b, o, SortOrder.getDefault()));
+                return new Timestamp(actualType.getCodec().decodeLong(b, o, sortOrder));
             case DECIMAL:
-                BigDecimal bd = (BigDecimal) actualType.toObject(b, o, l);
+                BigDecimal bd = (BigDecimal) actualType.toObject(b, o, l, actualType, sortOrder);
                 long ms = bd.longValue();
                 int nanos = (bd.remainder(BigDecimal.ONE).multiply(QueryConstants.BD_MILLIS_NANOS_CONVERSION)).intValue();
                 v = DateUtil.getTimestamp(ms, nanos);
                 return v;
-            default:
-                throw new ConstraintViolationException(actualType + " cannot be coerced to " + this);
             }
+            throwConstraintViolationException(actualType,this);
+            return null;
         }
         
         @Override
@@ -1652,7 +1718,21 @@ public enum PDataType {
 
         @Override
         public boolean isCoercibleTo(PDataType targetType, Object value) {
-            return DATE.isCoercibleTo(targetType, value) && (targetType == UNSIGNED_TIMESTAMP || targetType == this || ((Timestamp)value).getNanos() == 0);
+            if (value != null) {
+                switch (targetType) {
+                    case UNSIGNED_TIMESTAMP:
+                        return ((java.util.Date)value).getTime() >= 0;
+                    case UNSIGNED_DATE:
+                    case UNSIGNED_TIME:
+                        return ((java.util.Date)value).getTime() >= 0 && ((Timestamp)value).getNanos() == 0;
+                    case DATE:
+                    case TIME:
+                        return ((Timestamp)value).getNanos() == 0;
+                    default:
+                        break;
+                }
+            }
+            return super.isCoercibleTo(targetType, value);
         }
         
         @Override
@@ -1720,7 +1800,7 @@ public enum PDataType {
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
+        public Time toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (l == 0) {
                 return null;
             }
@@ -1729,12 +1809,17 @@ public enum PDataType {
             case UNSIGNED_TIMESTAMP:
             case DATE:
             case TIME:
+            case LONG:
+            case UNSIGNED_LONG:
             case UNSIGNED_DATE:
             case UNSIGNED_TIME:
-                return new Time(actualType.getCodec().decodeLong(b, o, SortOrder.getDefault()));
-            default:
-                throw new ConstraintViolationException(actualType + " cannot be coerced to " + this);
+                return new Time(actualType.getCodec().decodeLong(b, o, sortOrder));
+            case DECIMAL:
+                BigDecimal bd = (BigDecimal)actualType.toObject(b, o, l, actualType, sortOrder);
+                return new Time(bd.longValueExact());
             }
+            throwConstraintViolationException(actualType,this);
+            return null;
         }
 
         @Override
@@ -1752,8 +1837,13 @@ public enum PDataType {
             case TIME:
             case UNSIGNED_TIME:
                 return object;
+            case LONG:
+            case UNSIGNED_LONG:
+                return new Time((Long)object);
+            case DECIMAL:
+                return new Time(((BigDecimal)object).longValueExact());
             default:
-                return super.toObject(object, actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
 
@@ -1764,8 +1854,7 @@ public enum PDataType {
 
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || targetType == DATE || targetType == TIMESTAMP
-                    || targetType == VARBINARY || targetType == BINARY;
+            return DATE.isCoercibleTo(targetType);
         }
 
         @Override
@@ -1843,13 +1932,18 @@ public enum PDataType {
             case DATE:
             case UNSIGNED_DATE:
                 return object;
+            case LONG:
+            case UNSIGNED_LONG:
+                return new Date((Long)object);
+            case DECIMAL:
+                return new Date(((BigDecimal)object).longValueExact());
             default:
-                return super.toObject(object, actualType);
+                return throwConstraintViolationException(actualType,this);
             }
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
+        public Date toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (l == 0) {
                 return null;
             }
@@ -1858,22 +1952,27 @@ public enum PDataType {
             case UNSIGNED_TIMESTAMP:
             case DATE:
             case TIME:
+            case LONG:
+            case UNSIGNED_LONG:
             case UNSIGNED_DATE:
             case UNSIGNED_TIME:
-                return new Date(actualType.getCodec().decodeLong(b, o, SortOrder.getDefault()));
-            default:
-                throw new ConstraintViolationException(actualType + " cannot be coerced to " + this);
+                return new Date(actualType.getCodec().decodeLong(b, o, sortOrder));
+            case DECIMAL:
+                BigDecimal bd = (BigDecimal)actualType.toObject(b, o, l, actualType, sortOrder);
+                return new Date(bd.longValueExact());
             }
+            throwConstraintViolationException(actualType,this);
+            return null;
         }
 
         @Override
         public boolean isCastableTo(PDataType targetType) {
-            return super.isCastableTo(targetType) || DECIMAL.isCastableTo(targetType);
+            return super.isCastableTo(targetType) || targetType == DECIMAL || targetType == LONG || targetType == UNSIGNED_LONG;
         }
 
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || targetType == TIME || targetType == TIMESTAMP
+            return targetType == DATE || targetType == TIME || targetType == TIMESTAMP
                     || targetType == VARBINARY || targetType == BINARY;
         }
 
@@ -1881,9 +1980,9 @@ public enum PDataType {
         public boolean isCoercibleTo(PDataType targetType, Object value) {
             if (value != null) {
                 switch (targetType) {
+                    case UNSIGNED_TIMESTAMP:
                     case UNSIGNED_DATE:
                     case UNSIGNED_TIME:
-                    case UNSIGNED_TIMESTAMP:
                         return ((java.util.Date)value).getTime() >= 0;
                     default:
                         break;
@@ -1934,12 +2033,14 @@ public enum PDataType {
         }
         
         @Override
-        public void coerceBytes(ImmutableBytesWritable ptr, PDataType actualType, SortOrder actualModifier, SortOrder expectedModifier) {
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, 
+                Integer maxLength, Integer scale, SortOrder actualModifier,
+                Integer desiredMaxLength, Integer desiredScale, SortOrder expectedModifier) {
             if (ptr.getLength() > 0 && actualType  == PDataType.TIMESTAMP && actualModifier == expectedModifier) {
                 ptr.set(ptr.get(), ptr.getOffset(), getByteSize());
                 return;
             }
-            super.coerceBytes(ptr, actualType, actualModifier, expectedModifier);
+            super.coerceBytes(ptr, object, actualType, maxLength, scale, actualModifier, desiredMaxLength, desiredScale, expectedModifier);
         }
     },
     UNSIGNED_TIMESTAMP("UNSIGNED_TIMESTAMP", 19, Timestamp.class, null) {
@@ -1973,22 +2074,31 @@ public enum PDataType {
 
         @Override
         public Object toObject(Object object, PDataType actualType) {
-            return TIMESTAMP.toObject(object, actualType);
+            Timestamp ts = (Timestamp)TIMESTAMP.toObject(object, actualType);
+            throwIfNonNegativeDate(ts);
+            return ts;
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
-            return TIMESTAMP.toObject(b, o, l, actualType);
+        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            Timestamp ts = (Timestamp) TIMESTAMP.toObject(b, o, l, actualType, sortOrder);
+            throwIfNonNegativeDate(ts);
+            return ts;
         }
         
         @Override
         public boolean isCastableTo(PDataType targetType) {
-            return TIMESTAMP.isCastableTo(targetType);
+            return UNSIGNED_DATE.isCastableTo(targetType);
         }
 
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || targetType == TIMESTAMP || targetType == VARBINARY || targetType == BINARY;
+            return targetType == this || UNSIGNED_DATE.isCoercibleTo(targetType);
+        }
+
+        @Override
+        public boolean isCoercibleTo(PDataType targetType, Object value) {
+            return super.isCoercibleTo(targetType, value) || TIMESTAMP.isCoercibleTo(targetType, value);
         }
 
         @Override
@@ -2047,24 +2157,32 @@ public enum PDataType {
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
-            return TIME.toObject(b, o, l, actualType);
+        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            Time t = (Time)TIME.toObject(b, o, l, actualType, sortOrder);
+            throwIfNonNegativeDate(t);
+            return t;
         }
 
         @Override
         public Object toObject(Object object, PDataType actualType) {
-            return TIME.toObject(object, actualType);
+            Time t = (Time)TIME.toObject(object, actualType);
+            throwIfNonNegativeDate(t);
+            return t;
         }
 
         @Override
         public boolean isCastableTo(PDataType targetType) {
-            return TIME.isCastableTo(targetType);
+            return UNSIGNED_DATE.isCastableTo(targetType);
         }
 
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || targetType == TIME || targetType == UNSIGNED_DATE || targetType == DATE || targetType == UNSIGNED_TIMESTAMP || targetType == TIMESTAMP
-                    || targetType == VARBINARY || targetType == BINARY;
+            return UNSIGNED_DATE.isCoercibleTo(targetType);
+        }
+
+        @Override
+        public boolean isCoercibleTo(PDataType targetType, Object value) {
+            return super.isCoercibleTo(targetType, value) || TIME.isCoercibleTo(targetType, value);
         }
 
         @Override
@@ -2120,12 +2238,16 @@ public enum PDataType {
 
         @Override
         public Object toObject(Object object, PDataType actualType) {
-            return DATE.toObject(object, actualType);
+            Date d = (Date)DATE.toObject(object, actualType);
+            throwIfNonNegativeDate(d);
+            return d;
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
-            return DATE.toObject(b,o,l,actualType);
+        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            Date d = (Date)DATE.toObject(b,o,l,actualType, sortOrder);
+            throwIfNonNegativeDate(d);
+            return d;
         }
 
         @Override
@@ -2135,8 +2257,13 @@ public enum PDataType {
 
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || targetType == DATE || targetType == UNSIGNED_TIME || targetType == TIME || targetType == UNSIGNED_TIMESTAMP || targetType == TIMESTAMP
-                    || targetType == VARBINARY || targetType == BINARY;
+            return targetType == this || targetType == UNSIGNED_TIME || targetType == UNSIGNED_TIMESTAMP
+                    || DATE.isCoercibleTo(targetType);
+        }
+
+        @Override
+        public boolean isCoercibleTo(PDataType targetType, Object value) {
+            return super.isCoercibleTo(targetType, value) || DATE.isCoercibleTo(targetType, value);
         }
 
         @Override
@@ -2176,12 +2303,14 @@ public enum PDataType {
         }
         
         @Override
-        public void coerceBytes(ImmutableBytesWritable ptr, PDataType actualType, SortOrder actualModifier, SortOrder expectedModifier) {
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, 
+                Integer maxLength, Integer scale, SortOrder actualModifier,
+                Integer desiredMaxLength, Integer desiredScale, SortOrder expectedModifier) {
             if (ptr.getLength() > 0 && actualType  == PDataType.UNSIGNED_TIMESTAMP && actualModifier == expectedModifier) {
                 ptr.set(ptr.get(), ptr.getOffset(), getByteSize());
                 return;
             }
-            super.coerceBytes(ptr, actualType, actualModifier, expectedModifier);
+            super.coerceBytes(ptr, object, actualType, maxLength, scale, actualModifier, desiredMaxLength, desiredScale, expectedModifier);
         }
     },
     /**
@@ -2190,6 +2319,10 @@ public enum PDataType {
      * they're used as part of the row key when using the HBase utility methods).
      */
     UNSIGNED_LONG("UNSIGNED_LONG", 10 /* no constant available in Types */, Long.class, new UnsignedLongCodec()) {
+        @Override
+        public Integer getScale(Object o) {
+            return ZERO;
+        }
 
         @Override
         public byte[] toBytes(Object object) {
@@ -2208,120 +2341,26 @@ public enum PDataType {
 
         @Override
         public Object toObject(Object object, PDataType actualType) {
-            if (object == null) {
-                return null;
-            }
-            switch (actualType) {
-            case LONG:
-            case UNSIGNED_LONG:
-                long v = (Long) object;
-                if (v < 0) {
-                    throw new IllegalDataException("Value may not be negative(" + v + ")");
-                }
-                return v;
-            case UNSIGNED_INT:
-            case INTEGER:
-                v = (Integer) object;
-                if (v < 0) {
-                    throw new IllegalDataException("Value may not be negative(" + v + ")");
-                }
-                return v;
-            case SMALLINT:
-            case UNSIGNED_SMALLINT:
-                v = (Short) object;
-                if (v < 0) {
-                    throw new IllegalDataException("Value may not be negative(" + v + ")");
-                }
-                return v;
-            case UNSIGNED_TINYINT:
-            case TINYINT:
-                v = (Byte) object;
-                if (v < 0) {
-                    throw new IllegalDataException("Value may not be negative(" + v + ")");
-                }
-                return v;
-            case UNSIGNED_FLOAT:
-            case FLOAT:
-                Float f = (Float) object;
-                v = f.longValue();
-                if (v < 0) {
-                    throw new IllegalDataException("Value may not be negative(" + v + ")");
-                }
-                return v;
-            case UNSIGNED_DOUBLE:
-            case DOUBLE:
-                Double de = (Double) object;
-                v = de.longValue();
-                if (v < 0) {
-                    throw new IllegalDataException("Value may not be negative(" + v + ")");
-                }
-                return v;
-            case DECIMAL:
-                BigDecimal d = (BigDecimal) object;
-                if (d.signum() == -1) {
-                    throw new IllegalDataException("Value may not be negative(" + d + ")");
-                }
-                return d.longValueExact();
-            default:
-                return super.toObject(object, actualType);
-            }
+            Long v = (Long)LONG.toObject(object, actualType);
+            throwIfNonNegativeNumber(v);
+            return v;
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
-            if (l == 0) {
-                return null;
-            }
-            switch (actualType) {
-            case INTEGER:
-            case LONG:
-            case UNSIGNED_LONG:
-            case UNSIGNED_INT:
-            case SMALLINT:
-            case UNSIGNED_SMALLINT:
-            case TINYINT:
-            case UNSIGNED_TINYINT:
-            case FLOAT:
-            case UNSIGNED_FLOAT:
-            case DOUBLE:
-            case UNSIGNED_DOUBLE:
-                return actualType.getCodec().decodeLong(b, o, SortOrder.getDefault());
-            default:
-                return super.toObject(b,o,l,actualType);
-            }
+        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            Long v = (Long)LONG.toObject(b, o, l, actualType, sortOrder);
+            throwIfNonNegativeNumber(v);
+            return v;
         }
 
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || targetType == LONG || targetType == DECIMAL
-                    || targetType == VARBINARY || targetType == BINARY 
-                    || targetType == FLOAT || targetType == DOUBLE || targetType == UNSIGNED_FLOAT
-                    || targetType == UNSIGNED_DOUBLE;
+            return targetType == this || targetType == UNSIGNED_DOUBLE || LONG.isCoercibleTo(targetType);
         }
 
         @Override
         public boolean isCoercibleTo(PDataType targetType, Object value) {
-            if (value != null) {
-                switch (targetType) {
-                    case UNSIGNED_INT:
-                    case INTEGER:
-                        long l = (Long) value;
-                        return (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE);
-                    case UNSIGNED_SMALLINT:
-                    case SMALLINT:
-                        long s = (Long)value;
-                        return (s>=Short.MIN_VALUE && s<=Short.MAX_VALUE);
-                    case TINYINT:
-                        long t = (Long)value;
-                        return (t>=Byte.MIN_VALUE && t<=Byte.MAX_VALUE);
-                    case UNSIGNED_TINYINT:
-                        t = (Long)value;
-                        return (t>=0 && t<=Byte.MAX_VALUE);
-                    default:
-                        break;
-                }
-            }
-            return super.isCoercibleTo(targetType, value);
+            return super.isCoercibleTo(targetType, value) || LONG.isCoercibleTo(targetType, value);
         }
 
         @Override
@@ -2376,6 +2415,10 @@ public enum PDataType {
      * they're used as part of the row key when using the HBase utility methods).
      */
     UNSIGNED_INT("UNSIGNED_INT", 9 /* no constant available in Types */, Integer.class, new UnsignedIntCodec()) {
+        @Override
+        public Integer getScale(Object o) {
+            return ZERO;
+        }
 
         @Override
         public byte[] toBytes(Object object) {
@@ -2394,67 +2437,26 @@ public enum PDataType {
 
         @Override
         public Object toObject(Object object, PDataType actualType) {
-            Object o = UNSIGNED_LONG.toObject(object, actualType);
-            if(!(o instanceof Long) || o == null) {
-                return o;
-            }
-            long l = (Long)o;
-            if (l > Integer.MAX_VALUE) {
-                throw new IllegalDataException(actualType + " value " + l + " cannot be cast to Unsigned Integer without changing its value");
-            }
-            return (int)l;
+            Integer v = (Integer)INTEGER.toObject(object, actualType);
+            throwIfNonNegativeNumber(v);
+            return v;
         }
 
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
-            if (l == 0) {
-                return null;
-            }
-            switch (actualType) {
-            case UNSIGNED_LONG:
-            case LONG:
-            case UNSIGNED_INT:
-            case INTEGER:
-            case SMALLINT:
-            case UNSIGNED_SMALLINT:
-            case TINYINT:
-            case UNSIGNED_TINYINT:
-            case FLOAT:
-            case UNSIGNED_FLOAT:
-            case DOUBLE:
-            case UNSIGNED_DOUBLE:
-                return actualType.getCodec().decodeInt(b, o, SortOrder.getDefault());
-            default:
-                return super.toObject(b,o,l,actualType);
-            }
+        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            Integer v = (Integer)INTEGER.toObject(b, o, l, actualType, sortOrder);
+            throwIfNonNegativeNumber(v);
+            return v;
         }
 
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || targetType == INTEGER || UNSIGNED_LONG.isCoercibleTo(targetType);
+            return targetType == this || targetType == UNSIGNED_FLOAT || UNSIGNED_LONG.isCoercibleTo(targetType) || INTEGER.isCoercibleTo(targetType);
         }
         
         @Override
         public boolean isCoercibleTo(PDataType targetType, Object value) {
-            if (value != null) {
-                switch (targetType) {
-                    case UNSIGNED_SMALLINT:
-                        int s = (Integer)value;
-                        return (s>=0 && s<=Short.MAX_VALUE);
-                    case SMALLINT:
-                        s = (Integer)value;
-                        return (s>=Short.MIN_VALUE && s<=Short.MAX_VALUE);
-                    case TINYINT:
-                        s = (Integer)value;
-                        return (s>=Byte.MIN_VALUE && s<=Byte.MAX_VALUE);
-                    case UNSIGNED_TINYINT:
-                        s = (Integer)value;
-                        return (s>=0 && s<=Byte.MAX_VALUE);
-                    default:
-                        break;
-                }
-            }
-            return super.isCoercibleTo(targetType, value);
+            return super.isCoercibleTo(targetType, value) || INTEGER.isCoercibleTo(targetType, value);
         }
 
         @Override
@@ -2499,6 +2501,10 @@ public enum PDataType {
         }
     },
     UNSIGNED_SMALLINT("UNSIGNED_SMALLINT", 13, Short.class, new UnsignedShortCodec()) {
+        @Override
+        public Integer getScale(Object o) {
+            return ZERO;
+        }
 
       @Override
       public int compareTo(Object lhs, Object rhs, PDataType rhsType) {
@@ -2513,11 +2519,6 @@ public enum PDataType {
       @Override
       public Integer getByteSize() {
         return Bytes.SIZEOF_SHORT;
-      }
-      
-      @Override
-      public Integer getScale(Object o) {
-          return ZERO;
       }
       
       @Override
@@ -2561,39 +2562,16 @@ public enum PDataType {
       
       @Override
       public Object toObject(Object object, PDataType actualType) {
-          Object o = UNSIGNED_LONG.toObject(object, actualType);
-          if(!(o instanceof Long) || o == null) {
-              return o;
-          }
-          long l = (Long)o;
-          if (l > Short.MAX_VALUE) {
-              throw new IllegalDataException(actualType + " value " + l + " cannot be cast to Unsigned Short without changing its value");
-          }
-          return (short)l;
+          Short v = (Short)SMALLINT.toObject(object, actualType);
+          throwIfNonNegativeNumber(v);
+          return v;
       }
       
       @Override
-      public Object toObject(byte[] b, int o, int l, PDataType actualType) {
-          if (l == 0) {
-              return null;
-          }
-          switch (actualType) {
-          case UNSIGNED_LONG:
-          case LONG:
-          case UNSIGNED_INT:
-          case INTEGER:
-          case UNSIGNED_SMALLINT:
-          case SMALLINT:
-          case UNSIGNED_TINYINT:
-          case TINYINT:
-          case UNSIGNED_FLOAT:
-          case FLOAT:
-          case UNSIGNED_DOUBLE:
-          case DOUBLE:
-              return actualType.getCodec().decodeShort(b, o, SortOrder.getDefault());
-          default:
-              return super.toObject(b,o,l,actualType);
-          }
+      public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+          Short v = (Short)SMALLINT.toObject(b, o, l, actualType, sortOrder);
+          throwIfNonNegativeNumber(v);
+          return v;
       }
       
       @Override
@@ -2603,26 +2581,13 @@ public enum PDataType {
       
       @Override
       public boolean isCoercibleTo(PDataType targetType) {
-          return this == targetType || targetType == SMALLINT || UNSIGNED_INT.isCoercibleTo(targetType);
+          return targetType == this || UNSIGNED_INT.isCoercibleTo(targetType) || SMALLINT.isCoercibleTo(targetType);
       }
       
       @Override
       public boolean isCoercibleTo(PDataType targetType, Object value) {
-          if (value != null) {
-              switch (targetType) {
-                  case TINYINT:
-                    short ts = (Short)value;
-                    return (ts>=Byte.MIN_VALUE && ts<=Byte.MAX_VALUE);
-                  case UNSIGNED_TINYINT:
-                      short s = (Short)value;
-                      return (s>=0 && s<=Byte.MAX_VALUE);
-                  default:
-                      break;
-              }
-          }
-          return super.isCoercibleTo(targetType, value);
+          return super.isCoercibleTo(targetType, value) || SMALLINT.isCoercibleTo(targetType, value);
       }
-      
       
       @Override
       public int getResultSetSqlType() {
@@ -2630,6 +2595,10 @@ public enum PDataType {
       }
     },
     UNSIGNED_TINYINT("UNSIGNED_TINYINT", 11, Byte.class, new UnsignedByteCodec()) {
+        @Override
+        public Integer getScale(Object o) {
+            return ZERO;
+        }
 
       @Override
       public int compareTo(Object lhs, Object rhs, PDataType rhsType) {
@@ -2644,11 +2613,6 @@ public enum PDataType {
       @Override
       public Integer getByteSize() {
         return Bytes.SIZEOF_BYTE;
-      }
-      
-      @Override
-      public Integer getScale(Object o) {
-          return ZERO;
       }
       
       @Override
@@ -2689,44 +2653,26 @@ public enum PDataType {
       
       @Override
       public Object toObject(Object object, PDataType actualType) {
-          Object o = UNSIGNED_LONG.toObject(object, actualType);
-          if(!(o instanceof Long) || o == null) {
-              return o;
-          }
-          long l = (Long)o;
-          if (l > Byte.MAX_VALUE) {
-              throw new IllegalDataException(actualType + " value " + l + " cannot be cast to Unsigned Byte without changing its value");
-          }
-          return (byte)l;
+          Byte v = (Byte)TINYINT.toObject(object, actualType);
+          throwIfNonNegativeNumber(v);
+          return v;
       }
       
       @Override
-      public Object toObject(byte[] b, int o, int l, PDataType actualType) {
-          if (l == 0) {
-              return null;
-          }
-          switch (actualType) {
-          case UNSIGNED_LONG:
-          case LONG:
-          case UNSIGNED_INT:
-          case INTEGER:
-          case UNSIGNED_SMALLINT:
-          case SMALLINT:
-          case UNSIGNED_TINYINT:
-          case TINYINT:
-          case UNSIGNED_FLOAT:
-          case FLOAT:
-          case UNSIGNED_DOUBLE:
-          case DOUBLE:
-              return actualType.getCodec().decodeByte(b, o, SortOrder.getDefault());
-          default:
-              return super.toObject(b,o,l,actualType);
-          }
+      public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+          Byte v = (Byte)TINYINT.toObject(b, o, l, actualType, sortOrder);
+          throwIfNonNegativeNumber(v);
+          return v;
       }
       
       @Override
       public boolean isCoercibleTo(PDataType targetType) {
-          return this == targetType || targetType == TINYINT || UNSIGNED_SMALLINT.isCoercibleTo(targetType);
+          return targetType == this || UNSIGNED_SMALLINT.isCoercibleTo(targetType) || TINYINT.isCoercibleTo(targetType);
+      }
+      
+      @Override
+      public boolean isCoercibleTo(PDataType targetType, Object value) {
+          return super.isCoercibleTo(targetType, value) || TINYINT.isCoercibleTo(targetType, value);
       }
       
       @Override
@@ -2744,7 +2690,7 @@ public enum PDataType {
 
         @Override
         public int compareTo(Object lhs, Object rhs, PDataType rhsType) {
-            return DOUBLE.compareTo(lhs, rhs, rhsType);
+            return FLOAT.compareTo(lhs, rhs, rhsType);
         }
 
         @Override
@@ -2754,32 +2700,22 @@ public enum PDataType {
 
         @Override
         public Integer getByteSize() {
-            return Bytes.SIZEOF_INT;
+            return Bytes.SIZEOF_FLOAT;
         }
         
         @Override
         public Integer getScale(Object o) {
-            if (o == null) {
-                return null;
-            }
-            Float v = (Float) o;
-            BigDecimal bd = BigDecimal.valueOf(v);
-            return bd.scale();
+            return FLOAT.getScale(o);
         }
         
         @Override
         public Integer getMaxLength(Object o) {
-            if (o == null) {
-                return null;
-            }
-            Float v = (Float) o;
-            BigDecimal bd = BigDecimal.valueOf(v);
-            return bd.precision();
+            return FLOAT.getMaxLength(o);
         }
 
         @Override
         public byte[] toBytes(Object object) {
-            byte[] b = new byte[Bytes.SIZEOF_INT];
+            byte[] b = new byte[Bytes.SIZEOF_FLOAT];
             toBytes(object, b, 0);
             return b;
         }
@@ -2812,129 +2748,26 @@ public enum PDataType {
         
         @Override
         public Object toObject(Object object, PDataType actualType) {
-            if (object == null) {
-                return null;
-            }
-            switch (actualType) {
-            case UNSIGNED_FLOAT:
-                return object;
-            case FLOAT:
-                float f = (Float)object;
-                if (f < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + f + ")");
-                }
-                return object;
-            case UNSIGNED_DOUBLE:
-            case DOUBLE:
-                double d = (Double)object;
-                if (Double.isNaN(d)
-                        || d == Double.POSITIVE_INFINITY
-                        || (d >= 0 && d <= Float.MAX_VALUE)) {
-                    return (float) d;
-                } else {
-                    throw new IllegalDataException(actualType + " value " + d + " cannot be cast to Float without changing its value");
-                }
-            case LONG:
-            case UNSIGNED_LONG:
-                f = (Long)object;
-                if (f < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + f + ")");
-                }
-                return f;
-            case UNSIGNED_INT:
-            case INTEGER:
-                f = (Integer)object;
-                if (f < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + f + ")");
-                }
-                return f;
-            case TINYINT:
-            case UNSIGNED_TINYINT:
-                f = (Byte)object;
-                if (f < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + f + ")");
-                }
-                return f;
-            case SMALLINT:
-            case UNSIGNED_SMALLINT:
-                f = (Short)object;
-                if (f < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + f + ")");
-                }
-                return f;
-            case DECIMAL:
-                BigDecimal dl = (BigDecimal)object;
-                if (dl.signum() == -1) {
-                    throw new IllegalDataException("Value may not be negative(" + dl + ")");
-                }
-                return dl.floatValue();
-            default:
-                return super.toObject(object, actualType);
-            }
+            Float v = (Float)FLOAT.toObject(object, actualType);
+            throwIfNonNegativeNumber(v);
+            return v;
         }
         
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
-            if (l <= 0) {
-                return null;
-            }
-            switch (actualType) {
-            case UNSIGNED_FLOAT:
-            case FLOAT:
-            case UNSIGNED_DOUBLE:
-            case DOUBLE:
-            case UNSIGNED_LONG:
-            case LONG:
-            case UNSIGNED_INT:
-            case INTEGER:
-            case UNSIGNED_SMALLINT:
-            case SMALLINT:
-            case UNSIGNED_TINYINT:
-            case TINYINT:
-                return actualType.getCodec().decodeFloat(b, o, SortOrder.getDefault());
-            default:
-                return super.toObject(b,o,l,actualType);
-            }
+        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            Float v = (Float)FLOAT.toObject(b, o, l, actualType, sortOrder);
+            throwIfNonNegativeNumber(v);
+            return v;
         }
         
         @Override
         public boolean isCoercibleTo(PDataType targetType, Object value) {
-            if (value != null) {
-                float f = (Float)value;
-                switch (targetType) {
-                case UNSIGNED_FLOAT:
-                    return f >= 0;
-                case UNSIGNED_LONG:
-                    return (f >= 0 && f <= Long.MAX_VALUE);
-                case LONG:
-                    return (f >= Long.MIN_VALUE && f <= Long.MAX_VALUE);
-                case UNSIGNED_INT:
-                    return (f >= 0 && f <= Integer.MAX_VALUE);
-                case INTEGER:
-                    return (f >= Integer.MIN_VALUE && f <= Integer.MAX_VALUE);
-                case UNSIGNED_SMALLINT:
-                    return (f >= 0 && f <= Short.MAX_VALUE);
-                case SMALLINT:
-                    return (f >=Short.MIN_VALUE && f<=Short.MAX_VALUE);
-                case TINYINT:
-                    return (f >=Byte.MIN_VALUE && f<Byte.MAX_VALUE);
-                case UNSIGNED_TINYINT:
-                    return (f >=0 && f<Byte.MAX_VALUE);
-                default:
-                    break;
-                }
-            }
-            return super.isCoercibleTo(targetType, value);
+            return super.isCoercibleTo(targetType) || FLOAT.isCoercibleTo(targetType,value);
         }
         
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || targetType == FLOAT || UNSIGNED_DOUBLE.isCoercibleTo(targetType);
+            return this == targetType || UNSIGNED_DOUBLE.isCoercibleTo(targetType) || FLOAT.isCoercibleTo(targetType);
         }
         
         
@@ -2960,32 +2793,22 @@ public enum PDataType {
 
         @Override
         public Integer getByteSize() {
-            return Bytes.SIZEOF_LONG;
+            return Bytes.SIZEOF_DOUBLE;
         }
         
         @Override
         public Integer getScale(Object o) {
-            if (o == null) {
-                return null;
-            }
-            Double v = (Double) o;
-            BigDecimal bd = BigDecimal.valueOf(v);
-            return bd.scale();
+            return DOUBLE.getScale(o);
         }
         
         @Override
         public Integer getMaxLength(Object o) {
-            if (o == null) {
-                return null;
-            }
-            Double v = (Double) o;
-            BigDecimal db = BigDecimal.valueOf(v);
-            return db.precision();
+            return DOUBLE.getMaxLength(o);
         }
 
         @Override
         public byte[] toBytes(Object object) {
-            byte[] b = new byte[Bytes.SIZEOF_LONG];
+            byte[] b = new byte[Bytes.SIZEOF_DOUBLE];
             toBytes(object, b, 0);
             return b;
         }
@@ -3018,133 +2841,26 @@ public enum PDataType {
         
         @Override
         public Object toObject(Object object, PDataType actualType) {
-            if (object == null) {
-                return null;
-            }
-            double de;
-            switch (actualType) {
-            case UNSIGNED_DOUBLE:
-                return object;
-            case DOUBLE:
-                de = (Double)object;
-                if (de < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + de + ")");
-                }
-                return object;
-            case UNSIGNED_FLOAT:
-            case FLOAT:
-                de = (Float)object;
-                if (de < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + de + ")");
-                }
-                return de;
-            case LONG:
-            case UNSIGNED_LONG:
-                de = (Long)object;
-                if (de < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + de + ")");
-                }
-                return de;
-            case UNSIGNED_INT:
-            case INTEGER:
-                de = (Integer)object;
-                if (de < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + de + ")");
-                }
-                return de;
-            case TINYINT:
-            case UNSIGNED_TINYINT:
-                de = (Byte)object;
-                if (de < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + de + ")");
-                }
-                return de;
-            case SMALLINT:
-            case UNSIGNED_SMALLINT:
-                de = (Short)object;
-                if (de < 0) {
-                    throw new IllegalDataException("Value may not be negative("
-                            + de + ")");
-                }
-                return de;
-            case DECIMAL:
-                BigDecimal d = (BigDecimal)object;
-                if (d.signum() == -1) {
-                    throw new IllegalDataException("Value may not be negative(" + d + ")");
-                }
-                return d.doubleValue();
-            default:
-                return super.toObject(object, actualType);
-            }
+            Double v = (Double)DOUBLE.toObject(object, actualType);
+            throwIfNonNegativeNumber(v);
+            return v;
         }
         
         @Override
-        public Object toObject(byte[] b, int o, int l, PDataType actualType) {
-            if (l <= 0) {
-                return null;
-            }
-            switch (actualType) {
-            case UNSIGNED_DOUBLE:
-            case DOUBLE:
-            case UNSIGNED_FLOAT:
-            case FLOAT:
-            case UNSIGNED_LONG:
-            case LONG:
-            case UNSIGNED_INT:
-            case INTEGER:
-            case UNSIGNED_SMALLINT:
-            case SMALLINT:
-            case UNSIGNED_TINYINT:
-            case TINYINT:
-                return actualType.getCodec().decodeDouble(b, o, SortOrder.getDefault());
-            default:
-                return super.toObject(b,o,l,actualType);
-            }
+        public Object toObject(byte[] b, int o, int l, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            Double v = (Double)DOUBLE.toObject(b, o, l, actualType, sortOrder);
+            throwIfNonNegativeNumber(v);
+            return v;
         }
         
         @Override
         public boolean isCoercibleTo(PDataType targetType, Object value) {
-            if (value != null) {
-                double d = (Double)value;
-                switch (targetType) {
-                case UNSIGNED_FLOAT:
-                    return Double.isNaN(d) || d == Double.POSITIVE_INFINITY
-                            || (d >= 0 && d <= Float.MAX_VALUE);
-                case FLOAT:
-                    return Double.isNaN(d)
-                            || d == Double.POSITIVE_INFINITY
-                            || (d >= -Float.MAX_VALUE && d <= Float.MAX_VALUE);
-                case UNSIGNED_LONG:
-                    return (d >= 0 && d <= Long.MAX_VALUE);
-                case LONG:
-                    return (d >= Long.MIN_VALUE && d <= Long.MAX_VALUE);
-                case UNSIGNED_INT:
-                    return (d >= 0 && d <= Integer.MAX_VALUE);
-                case INTEGER:
-                    return (d >= Integer.MIN_VALUE && d <= Integer.MAX_VALUE);
-                case UNSIGNED_SMALLINT:
-                    return (d >= 0 && d <= Short.MAX_VALUE);
-                case SMALLINT:
-                    return (d >=Short.MIN_VALUE && d<=Short.MAX_VALUE);
-                case TINYINT:
-                    return (d >=Byte.MIN_VALUE && d<Byte.MAX_VALUE);
-                case UNSIGNED_TINYINT:
-                    return (d >=0 && d<Byte.MAX_VALUE);
-                default:
-                    break;
-                }
-            }
-            return super.isCoercibleTo(targetType, value);
+            return super.isCoercibleTo(targetType, value)|| DOUBLE.isCoercibleTo(targetType, value);
         }
         
         @Override
         public boolean isCoercibleTo(PDataType targetType) {
-            return this == targetType || DOUBLE.isCoercibleTo(targetType);
+            return  this == targetType || DOUBLE.isCoercibleTo(targetType);
         }
         
         
@@ -3158,6 +2874,7 @@ public enum PDataType {
         @Override
         public byte[] toBytes(Object object) {
             if (object == null) {
+                // TODO: review - return null?
                 throw new ConstraintViolationException(this + " may not be null");
             }
             return ((Boolean)object).booleanValue() ? TRUE_BYTES : FALSE_BYTES;
@@ -3166,6 +2883,7 @@ public enum PDataType {
         @Override
         public int toBytes(Object object, byte[] bytes, int offset) {
             if (object == null) {
+                // TODO: review - return null?
                 throw new ConstraintViolationException(this + " may not be null");
             }
             bytes[offset] = ((Boolean)object).booleanValue() ? TRUE_BYTE : FALSE_BYTE;
@@ -3175,21 +2893,41 @@ public enum PDataType {
         @Override
         public byte[] toBytes(Object object, SortOrder sortOrder) {
             if (object == null) {
+                // TODO: review - return null?
                 throw new ConstraintViolationException(this + " may not be null");
             }
-            // Override to prevent any byte allocation
-            if (sortOrder == SortOrder.ASC) {
-                return ((Boolean)object).booleanValue() ? TRUE_BYTES : FALSE_BYTES;
-            }
-            return ((Boolean)object).booleanValue() ? INVERTED_TRUE_BYTES : INVERTED_FALSE_BYTES;
+            return ((Boolean)object).booleanValue() ^ sortOrder == SortOrder.ASC ? TRUE_BYTES : FALSE_BYTES;
         }
 
         @Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType targetType) {
-            if (!isCoercibleTo(targetType)) {
-                throw new ConstraintViolationException(this + " cannot be coerced to " + targetType);
+        public Boolean toObject(byte[] bytes, int offset, int length, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            Preconditions.checkNotNull(sortOrder);          
+            if (length == 0) {
+                return null;
             }
-            return length == 0 ? null : bytes[offset] == FALSE_BYTE ? Boolean.FALSE : Boolean.TRUE;
+            switch (actualType) {
+                case BOOLEAN:
+                    if (length > 1) {
+                        throw new IllegalDataException("BOOLEAN may only be a single byte");
+                    }
+                    return ((bytes[offset] == FALSE_BYTE ^ sortOrder == SortOrder.DESC) ? Boolean.FALSE : Boolean.TRUE);
+                case DECIMAL:
+                    // false translated to the ZERO_BYTE
+                    return ((bytes[offset] == ZERO_BYTE ^ sortOrder == SortOrder.DESC) ? Boolean.FALSE : Boolean.TRUE);
+            }
+            throwConstraintViolationException(actualType,this);
+            return null;
+        }
+
+        @Override
+        public boolean isCoercibleTo(PDataType targetType) {
+            return super.isCoercibleTo(targetType) || targetType == BINARY;
+        }
+        
+        @Override
+        public boolean isCastableTo(PDataType targetType) {
+            // Allow cast to BOOLEAN so it can be used in an index or group by
+            return super.isCastableTo(targetType) || targetType == DECIMAL;
         }
 
         @Override
@@ -3215,6 +2953,18 @@ public enum PDataType {
         @Override
         public Object toObject(String value) {
             return Boolean.parseBoolean(value);
+        }
+
+        @Override
+        public Object toObject(Object object, PDataType actualType) {
+            if (actualType == this || object == null) {
+                return object;
+            }
+            if (actualType == VARBINARY || actualType == BINARY) {
+                byte[] bytes = (byte[])object;
+                return toObject(bytes, 0, bytes.length);
+            }
+            return throwConstraintViolationException(actualType,this);
         }
     },
     VARBINARY("VARBINARY", Types.VARBINARY, byte[].class, null) {
@@ -3251,16 +3001,20 @@ public enum PDataType {
         }
 
         @Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
+        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (length == 0) {
                 return null;
             }
-            if (offset == 0 && bytes.length == length) {
+            if (offset == 0 && bytes.length == length && sortOrder == SortOrder.ASC) {
                 return bytes;
             }
-            byte[] o = new byte[length];
-            System.arraycopy(bytes, offset, o, 0, length);
-            return o;
+            byte[] bytesCopy = new byte[length];
+            System.arraycopy(bytes, offset, bytesCopy, 0, length);
+            if (sortOrder == SortOrder.DESC) {
+                bytesCopy = SortOrder.invert(bytes, offset, bytesCopy, 0, length);
+                offset = 0;
+            }
+            return bytesCopy;
         }
 
         @Override
@@ -3290,9 +3044,9 @@ public enum PDataType {
         }
 
         @Override
-        public boolean isSizeCompatible(PDataType srcType, Object value, byte[] b,
-                Integer maxLength, Integer desiredMaxLength, Integer scale, Integer desiredScale) {
-            if (srcType == PDataType.BINARY && maxLength != null && desiredMaxLength != null) {
+        public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value, PDataType srcType,
+                Integer maxLength, Integer scale, Integer desiredMaxLength, Integer desiredScale) {
+            if (ptr.getLength() != 0 && srcType == PDataType.BINARY && maxLength != null && desiredMaxLength != null) {
                 return maxLength <= desiredMaxLength;
             }
             return true;
@@ -3340,6 +3094,24 @@ public enum PDataType {
     },
     BINARY("BINARY", Types.BINARY, byte[].class, null) {
         @Override
+        public Object pad(Object object, int maxLength) {
+            byte[] b = (byte[]) object;
+            if (b == null) {
+                return null;
+            }
+            if (b.length == maxLength) {
+                return object;
+            }
+            if (b.length > maxLength) {
+                throw new ValueTypeIncompatibleException(this,maxLength,null);
+            }
+            byte[] newBytes = new byte[maxLength];
+            System.arraycopy(b, 0, newBytes, 0, b.length);
+            
+            return newBytes;
+        }
+        
+        @Override
         public byte[] toBytes(Object object) { // Deligate to VARBINARY
             if (object == null) {
                 throw new ConstraintViolationException(this + " may not be null");
@@ -3366,11 +3138,11 @@ public enum PDataType {
         }
 
         @Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
+        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
             if (!actualType.isCoercibleTo(this)) {
                 throw new ConstraintViolationException(actualType + " cannot be coerced to " + this);
             }
-            return VARBINARY.toObject(bytes, offset, length, actualType);
+            return VARBINARY.toObject(bytes, offset, length, actualType, sortOrder);
         }
 
         @Override
@@ -3395,10 +3167,10 @@ public enum PDataType {
         }
 
         @Override
-        public boolean isSizeCompatible(PDataType srcType, Object value, byte[] b,
-                Integer maxLength, Integer desiredMaxLength, Integer scale, Integer desiredScale) {
-            if ((srcType == PDataType.VARBINARY && ((String)value).length() != b.length) ||
-                    (maxLength != null && desiredMaxLength != null && maxLength > desiredMaxLength)){
+        public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value, PDataType srcType,
+                Integer maxLength, Integer scale, Integer desiredMaxLength, Integer desiredScale) {
+            if (ptr.getLength() != 0 && ((srcType == PDataType.VARBINARY && ((String)value).length() != ptr.getLength()) ||
+                    (maxLength != null && desiredMaxLength != null && maxLength > desiredMaxLength))){
                 return false;
             }
             return true;
@@ -3454,7 +3226,7 @@ public enum PDataType {
             return VARBINARY.toStringLiteral(b, offset, length, formatter);
         }
     },
-    INTEGER_ARRAY("INTEGER_ARRAY", Types.ARRAY + PDataType.INTEGER.getSqlType(), PhoenixArray.class, null) {
+    INTEGER_ARRAY("INTEGER_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.INTEGER.getSqlType(), PhoenixArray.class, null) {
     	@Override
     	public boolean isArrayType() {
     		return true;
@@ -3474,10 +3246,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.INTEGER);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.INTEGER, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -3494,21 +3271,25 @@ public enum PDataType {
 			return pDataTypeForArray.toObject(object, actualType);
 		}
 		
-        @Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.INTEGER);
-		}
-		
 		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.INTEGER, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.INTEGER, sortOrder, maxLength, scale,
+                    PDataType.INTEGER);
 		}
 		
 		@Override
 		public boolean isCoercibleTo(PDataType targetType) {
 			return pDataTypeForArray.isCoercibleTo(targetType, PDataType.INTEGER_ARRAY);
 		}
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
 		
 		@Override
 		public boolean isCoercibleTo(PDataType targetType, Object value) {
@@ -3521,9 +3302,14 @@ public enum PDataType {
            }
 		   return true;
 		}
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
 		
 	},
-    BOOLEAN_ARRAY("BOOLEAN_ARRAY", Types.ARRAY + PDataType.BOOLEAN.getSqlType(), PhoenixArray.class, null) {
+    BOOLEAN_ARRAY("BOOLEAN_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.BOOLEAN.getSqlType(), PhoenixArray.class, null) {
     	@Override
     	public boolean isArrayType() {
     		return true;
@@ -3543,10 +3329,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.BOOLEAN);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.BOOLEAN, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -3564,14 +3355,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.BOOLEAN);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.BOOLEAN, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.BOOLEAN, sortOrder, maxLength, scale,
+                    PDataType.BOOLEAN);
 		}
 		
 		@Override
@@ -3591,9 +3378,22 @@ public enum PDataType {
            }
 		   return true;
 		}
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+		
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
 		
 	},
-	VARCHAR_ARRAY("VARCHAR_ARRAY", Types.ARRAY + PDataType.VARCHAR.getSqlType(), PhoenixArray.class, null) {
+	VARCHAR_ARRAY("VARCHAR_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.VARCHAR.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -3612,10 +3412,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.VARCHAR);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.VARCHAR, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -3633,14 +3438,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.VARCHAR);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.VARCHAR, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.VARCHAR, sortOrder, maxLength, scale,
+                    PDataType.VARCHAR);
 		}
 		
 		@Override
@@ -3661,21 +3462,27 @@ public enum PDataType {
         }
 		
         @Override
-        public boolean isSizeCompatible(PDataType srcType, Object value, byte[] b, Integer maxLength,
-                Integer desiredMaxLength, Integer scale, Integer desiredScale) {
-            return pDataTypeForArray.isSizeCompatible(srcType, value, b, maxLength, desiredMaxLength, scale,
+        public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value, PDataType srcType, Integer maxLength,
+                Integer scale, Integer desiredMaxLength, Integer desiredScale) {
+            return pDataTypeForArray.isSizeCompatible(ptr, value, srcType, maxLength, scale, desiredMaxLength,
                     desiredScale);
         }
 
         @Override
-        public byte[] coerceBytes(byte[] b, Object object, PDataType actualType, Integer maxLength, Integer scale,
-                Integer desiredMaxLength, Integer desiredScale) {
-            return pDataTypeForArray.coerceBytes(b, object, actualType, maxLength, scale, desiredMaxLength,
-                    desiredScale);
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
         }
 		
 	},
-	VARBINARY_ARRAY("VARBINARY_ARRAY", Types.ARRAY + PDataType.VARBINARY.getSqlType(), PhoenixArray.class, null) {
+	VARBINARY_ARRAY("VARBINARY_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.VARBINARY.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -3694,10 +3501,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.VARBINARY);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.VARBINARY, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -3715,14 +3527,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.VARBINARY);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.VARBINARY, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.VARBINARY, sortOrder, maxLength, scale,
+                    PDataType.VARBINARY);
 		}
 		
 		@Override
@@ -3743,21 +3551,27 @@ public enum PDataType {
         }
 		
 		@Override
-		public boolean isSizeCompatible(PDataType srcType, Object value,
-				byte[] b, Integer maxLength, Integer desiredMaxLength,
-				Integer scale, Integer desiredScale) {
-			return pDataTypeForArray.isSizeCompatible(srcType, value, b,
-					maxLength, desiredMaxLength, scale, desiredScale);
+		public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value,
+				PDataType srcType, Integer maxLength, Integer scale,
+				Integer desiredMaxLength, Integer desiredScale) {
+			return pDataTypeForArray.isSizeCompatible(ptr, value, srcType,
+					maxLength, scale, desiredMaxLength, desiredScale);
 		}
 
         @Override
-        public byte[] coerceBytes(byte[] b, Object object, PDataType actualType, Integer maxLength, Integer scale,
-                Integer desiredMaxLength, Integer desiredScale) {
-            return pDataTypeForArray.coerceBytes(b, object, actualType, maxLength, scale, desiredMaxLength,
-                    desiredScale);
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
         }
 	},
-	BINARY_ARRAY("BINARY_ARRAY", Types.ARRAY + PDataType.BINARY.getSqlType(), PhoenixArray.class, null) {
+	BINARY_ARRAY("BINARY_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.BINARY.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -3776,10 +3590,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.BINARY);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.BINARY, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -3797,14 +3616,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.BINARY);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.BINARY, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.BINARY, sortOrder, maxLength, scale,
+                    PDataType.BINARY);
 		}
 		
 		@Override
@@ -3825,22 +3640,27 @@ public enum PDataType {
         }
 		
 		@Override
-		public boolean isSizeCompatible(PDataType srcType, Object value,
-				byte[] b, Integer maxLength, Integer desiredMaxLength,
-				Integer scale, Integer desiredScale) {
-			return pDataTypeForArray.isSizeCompatible(srcType, value, b,
-					maxLength, desiredMaxLength, scale, desiredScale);
+		public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value,
+				PDataType srcType, Integer maxLength, Integer scale,
+				Integer desiredMaxLength, Integer desiredScale) {
+			return pDataTypeForArray.isSizeCompatible(ptr, value, srcType,
+					maxLength, scale, desiredMaxLength, desiredScale);
 		}
 	
         @Override
-        public byte[] coerceBytes(byte[] b, Object object, PDataType actualType, Integer maxLength, Integer scale,
-                Integer desiredMaxLength, Integer desiredScale) {
-            return pDataTypeForArray.coerceBytes(b, object, actualType, maxLength, scale, desiredMaxLength,
-                    desiredScale);
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
         }
 
-	},
-	CHAR_ARRAY("CHAR_ARRAY", Types.ARRAY + PDataType.CHAR.getSqlType(), PhoenixArray.class, null) {
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+    },
+	CHAR_ARRAY("CHAR_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.CHAR.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -3860,10 +3680,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.CHAR);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.CHAR, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -3881,14 +3706,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.CHAR);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.CHAR, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.CHAR, sortOrder, maxLength, scale,
+                    PDataType.CHAR);
 		}
 		
 		@Override
@@ -3909,21 +3730,27 @@ public enum PDataType {
         }
 		
 		@Override
-		public boolean isSizeCompatible(PDataType srcType, Object value,
-				byte[] b, Integer maxLength, Integer desiredMaxLength,
-				Integer scale, Integer desiredScale) {
-			return pDataTypeForArray.isSizeCompatible(srcType, value, b,
-					maxLength, desiredMaxLength, scale, desiredScale);
+		public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value,
+				PDataType srcType, Integer maxLength, Integer scale,
+				Integer desiredMaxLength, Integer desiredScale) {
+			return pDataTypeForArray.isSizeCompatible(ptr, value, srcType,
+					maxLength, scale, desiredMaxLength, desiredScale);
 		}
 		
 		@Override
-		public byte[] coerceBytes(byte[] b, Object object, PDataType actualType, Integer maxLength, Integer scale,
-		        Integer desiredMaxLength, Integer desiredScale) {
-		    return pDataTypeForArray.coerceBytes(b, object, actualType, maxLength, scale, desiredMaxLength, desiredScale);
+		public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength, Integer scale,
+		        SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale, SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
 		}
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
 		
 	},
-	LONG_ARRAY("LONG_ARRAY", Types.ARRAY + PDataType.LONG.getSqlType(), PhoenixArray.class, null) {
+	LONG_ARRAY("LONG_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.LONG.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -3942,10 +3769,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.LONG);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.LONG, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -3963,14 +3795,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.LONG);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.LONG, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.LONG, sortOrder, maxLength, scale,
+                    PDataType.LONG);
 		}
 		
 		@Override
@@ -3989,9 +3817,22 @@ public enum PDataType {
            }
            return true;
         }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+		
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
 		
 	},
-	SMALLINT_ARRAY("SMALLINT_ARRAY", Types.ARRAY + PDataType.SMALLINT.getSqlType(), PhoenixArray.class, null) {
+	SMALLINT_ARRAY("SMALLINT_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.SMALLINT.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4010,10 +3851,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.SMALLINT);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.SMALLINT, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4031,14 +3877,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.SMALLINT);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.SMALLINT, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.SMALLINT, sortOrder, maxLength, scale,
+                    PDataType.SMALLINT);
 		}
 		
 		@Override
@@ -4057,9 +3899,22 @@ public enum PDataType {
            }
            return true;
         }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+		
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
 		
 	},
-	TINYINT_ARRAY("TINYINT_ARRAY", Types.ARRAY + PDataType.TINYINT.getSqlType(), PhoenixArray.class, null) {
+	TINYINT_ARRAY("TINYINT_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.TINYINT.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4078,10 +3933,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.TINYINT);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.TINYINT, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4099,19 +3959,23 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.TINYINT);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.TINYINT, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.TINYINT, sortOrder, maxLength, scale,
+                    PDataType.TINYINT);
 		}
 		
 		@Override
         public boolean isCoercibleTo(PDataType targetType) {
             return pDataTypeForArray.isCoercibleTo(targetType, PDataType.TINYINT_ARRAY);
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
         }
 		
 		@Override
@@ -4125,9 +3989,14 @@ public enum PDataType {
            }
            return true;
         }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
 		
 	},
-	FLOAT_ARRAY("FLOAT_ARRAY", Types.ARRAY + PDataType.FLOAT.getSqlType(), PhoenixArray.class, null) {
+	FLOAT_ARRAY("FLOAT_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.FLOAT.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4147,10 +4016,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.FLOAT);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.FLOAT, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4168,14 +4042,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.FLOAT);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.FLOAT, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.FLOAT, sortOrder, maxLength, scale,
+                    PDataType.FLOAT);
 		}
 	
 		@Override
@@ -4194,9 +4064,22 @@ public enum PDataType {
            }
            return true;
         }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+		
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
 		
 	},
-	DOUBLE_ARRAY("DOUBLE_ARRAY", Types.ARRAY + PDataType.DOUBLE.getSqlType(), PhoenixArray.class, null) {
+	DOUBLE_ARRAY("DOUBLE_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.DOUBLE.getSqlType(), PhoenixArray.class, null) {
 	    final PArrayDataType pDataTypeForArray = new PArrayDataType();
 		@Override
     	public boolean isArrayType() {
@@ -4216,10 +4099,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.DOUBLE);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.DOUBLE, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4237,14 +4125,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.DOUBLE);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.DOUBLE, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.DOUBLE, sortOrder, maxLength, scale,
+                    PDataType.DOUBLE);
 		}
 		
 		@Override
@@ -4263,10 +4147,23 @@ public enum PDataType {
            }
            return true;
         }
+		
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
 
 	},
 	
-	DECIMAL_ARRAY("DECIMAL_ARRAY", Types.ARRAY + PDataType.DECIMAL.getSqlType(), PhoenixArray.class, null) {
+	DECIMAL_ARRAY("DECIMAL_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.DECIMAL.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4285,10 +4182,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.DECIMAL);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.DECIMAL, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4306,15 +4208,19 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.DECIMAL);
+		public Object toObject(byte[] bytes, int offset, int length,
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.DECIMAL, sortOrder, maxLength, scale,
+                    PDataType.DECIMAL);
 		}
 		
-		@Override
-		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.DECIMAL, sortOrder);
-		}
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
 	
 		@Override
         public boolean isCoercibleTo(PDataType targetType) {
@@ -4334,15 +4240,20 @@ public enum PDataType {
         }
 		
 		@Override
-		public boolean isSizeCompatible(PDataType srcType, Object value,
-				byte[] b, Integer maxLength, Integer desiredMaxLength,
-				Integer scale, Integer desiredScale) {
-			return pDataTypeForArray.isSizeCompatible(srcType, value, b,
-					maxLength, desiredMaxLength, scale, desiredScale);
+		public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value,
+				PDataType srcType, Integer maxLength, Integer scale,
+				Integer desiredMaxLength, Integer desiredScale) {
+			return pDataTypeForArray.isSizeCompatible(ptr, value, srcType,
+					maxLength, scale, desiredMaxLength, desiredScale);
 		}
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
 	
 	},
-	TIMESTAMP_ARRAY("TIMESTAMP_ARRAY", Types.ARRAY + PDataType.TIMESTAMP.getSqlType(), PhoenixArray.class,
+	TIMESTAMP_ARRAY("TIMESTAMP_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.TIMESTAMP.getSqlType(), PhoenixArray.class,
 			null) {
 		@Override
     	public boolean isArrayType() {
@@ -4362,10 +4273,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.TIMESTAMP);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.TIMESTAMP, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4383,14 +4299,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.TIMESTAMP);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.TIMESTAMP, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.TIMESTAMP, sortOrder, maxLength, scale,
+                    PDataType.TIMESTAMP);
 		}
 		
 		@Override
@@ -4410,8 +4322,21 @@ public enum PDataType {
            return true;
         }
 
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
 	},
-	UNSIGNED_TIMESTAMP_ARRAY("UNSIGNED_TIMESTAMP_ARRAY", Types.ARRAY + PDataType.UNSIGNED_TIMESTAMP.getSqlType(), PhoenixArray.class,
+	UNSIGNED_TIMESTAMP_ARRAY("UNSIGNED_TIMESTAMP_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.UNSIGNED_TIMESTAMP.getSqlType(), PhoenixArray.class,
 			null) {
 		@Override
     	public boolean isArrayType() {
@@ -4431,10 +4356,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_TIMESTAMP);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_TIMESTAMP, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4452,14 +4382,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_TIMESTAMP);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_TIMESTAMP, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_TIMESTAMP, sortOrder,
+                    maxLength, scale, PDataType.UNSIGNED_TIMESTAMP);
 		}
 		
 		@Override
@@ -4478,9 +4404,22 @@ public enum PDataType {
            }
            return true;
         }
+		
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
 
 	},
-	TIME_ARRAY("TIME_ARRAY", Types.ARRAY + PDataType.TIME.getSqlType(), PhoenixArray.class, null) {
+	TIME_ARRAY("TIME_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.TIME.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4499,15 +4438,20 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.TIME);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
 
-		@Override
-		public int toBytes(Object object, byte[] bytes, int offset) {
-			return pDataTypeForArray.toBytes(object, bytes, offset);
-		}
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.TIME, sortOrder);
+        }
+
+        @Override
+        public int toBytes(Object object, byte[] bytes, int offset) {
+            return pDataTypeForArray.toBytes(object, bytes, offset);
+        }
 
 		@Override
 		public Object toObject(String value) {
@@ -4520,14 +4464,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.TIME);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.TIME, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.TIME, sortOrder, maxLength, scale,
+                    PDataType.TIME);
 		}
 		
 		@Override
@@ -4547,8 +4487,21 @@ public enum PDataType {
            return true;
         }
 
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+        
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
 	},
-	UNSIGNED_TIME_ARRAY("UNSIGNED_TIME_ARRAY", Types.ARRAY + PDataType.UNSIGNED_TIME.getSqlType(), PhoenixArray.class, null) {
+	UNSIGNED_TIME_ARRAY("UNSIGNED_TIME_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.UNSIGNED_TIME.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4567,10 +4520,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_TIME);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_TIME, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4588,14 +4546,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_TIME);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_TIME, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_TIME, sortOrder, maxLength,
+                    scale, PDataType.UNSIGNED_TIME);
 		}
 		
 		@Override
@@ -4614,9 +4568,22 @@ public enum PDataType {
            }
            return true;
         }
+		
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
 
 	},
-	DATE_ARRAY("DATE_ARRAY", Types.ARRAY + PDataType.DATE.getSqlType(), PhoenixArray.class, null) {
+	DATE_ARRAY("DATE_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.DATE.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4635,10 +4602,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.DATE);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.DATE, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4656,14 +4628,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.DATE);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.DATE, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.DATE, sortOrder, maxLength, scale,
+                    PDataType.DATE);
 		}
 		
 		@Override
@@ -4683,8 +4651,21 @@ public enum PDataType {
            return true;
         }
 
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
 	},
-	UNSIGNED_DATE_ARRAY("UNSIGNED_DATE_ARRAY", Types.ARRAY + PDataType.UNSIGNED_DATE.getSqlType(), PhoenixArray.class, null) {
+	UNSIGNED_DATE_ARRAY("UNSIGNED_DATE_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.UNSIGNED_DATE.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4703,10 +4684,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_DATE);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_DATE, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4724,14 +4710,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_DATE);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_DATE, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_DATE, sortOrder, maxLength,
+                    scale, PDataType.UNSIGNED_DATE);
 		}
 		
 		@Override
@@ -4751,8 +4733,21 @@ public enum PDataType {
            return true;
         }
 
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
 	},
-	UNSIGNED_LONG_ARRAY("UNSIGNED_LONG_ARRAY", Types.ARRAY + PDataType.UNSIGNED_LONG.getSqlType(), PhoenixArray.class, null) {
+	UNSIGNED_LONG_ARRAY("UNSIGNED_LONG_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.UNSIGNED_LONG.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4771,10 +4766,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_LONG);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_LONG, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4792,14 +4792,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_LONG);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_LONG, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_LONG, sortOrder, maxLength,
+                    scale, PDataType.UNSIGNED_LONG);
 		}
 		
 		@Override
@@ -4818,9 +4814,22 @@ public enum PDataType {
            }
            return true;
         }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
 	
 	},
-	UNSIGNED_INT_ARRAY("UNSIGNED_INT_ARRAY", Types.ARRAY + PDataType.UNSIGNED_INT.getSqlType(), PhoenixArray.class, null) {
+	UNSIGNED_INT_ARRAY("UNSIGNED_INT_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.UNSIGNED_INT.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -4839,10 +4848,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_INT);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_INT, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4860,14 +4874,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_INT);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_INT, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_INT, sortOrder, maxLength,
+                    scale, PDataType.UNSIGNED_INT);
 		}
 
 		@Override
@@ -4887,8 +4897,21 @@ public enum PDataType {
            return true;
         }
 
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
 	},
-	UNSIGNED_SMALLINT_ARRAY("UNSIGNED_SMALLINT_ARRAY", Types.ARRAY + PDataType.UNSIGNED_SMALLINT.getSqlType(),
+	UNSIGNED_SMALLINT_ARRAY("UNSIGNED_SMALLINT_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.UNSIGNED_SMALLINT.getSqlType(),
 			PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
@@ -4908,10 +4931,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_SMALLINT);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_SMALLINT, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4929,14 +4957,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_SMALLINT);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_SMALLINT, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_SMALLINT, sortOrder, maxLength,
+                    scale, PDataType.UNSIGNED_SMALLINT);
 		}
 		
 		@Override
@@ -4956,8 +4980,21 @@ public enum PDataType {
            return true;
         }
 
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
 	},
-	UNSIGNED_TINYINT_ARRAY("UNSIGNED_TINYINT__ARRAY", Types.ARRAY + PDataType.UNSIGNED_TINYINT.getSqlType(), PhoenixArray.class,
+	UNSIGNED_TINYINT_ARRAY("UNSIGNED_TINYINT__ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.UNSIGNED_TINYINT.getSqlType(), PhoenixArray.class,
 			null) {
 		@Override
     	public boolean isArrayType() {
@@ -4977,10 +5014,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_TINYINT);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_TINYINT, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -4998,14 +5040,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_TINYINT);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_TINYINT, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_TINYINT, sortOrder, maxLength,
+                    scale, PDataType.UNSIGNED_TINYINT);
 		}
 		
 		@Override
@@ -5024,8 +5062,21 @@ public enum PDataType {
            }
            return true;
         }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
 	},
-	UNSIGNED_FLOAT_ARRAY("UNSIGNED_FLOAT_ARRAY", Types.ARRAY + PDataType.UNSIGNED_FLOAT.getSqlType(), PhoenixArray.class, null) {
+	UNSIGNED_FLOAT_ARRAY("UNSIGNED_FLOAT_ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.UNSIGNED_FLOAT.getSqlType(), PhoenixArray.class, null) {
 		@Override
     	public boolean isArrayType() {
     		return true;
@@ -5044,10 +5095,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_FLOAT);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_FLOAT, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -5065,14 +5121,10 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_FLOAT);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_FLOAT, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_FLOAT, sortOrder, maxLength,
+                    scale, PDataType.UNSIGNED_FLOAT);
 		}
 
 		@Override
@@ -5092,8 +5144,21 @@ public enum PDataType {
            return true;
         }
 
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
+        }
+
 	},
-	UNSIGNED_DOUBLE_ARRAY("UNSIGNED_DOUBLE__ARRAY", Types.ARRAY + PDataType.UNSIGNED_DOUBLE.getSqlType(), PhoenixArray.class,
+	UNSIGNED_DOUBLE_ARRAY("UNSIGNED_DOUBLE__ARRAY", PDataType.ARRAY_TYPE_BASE + PDataType.UNSIGNED_DOUBLE.getSqlType(), PhoenixArray.class,
 			null) {
 		@Override
     	public boolean isArrayType() {
@@ -5113,10 +5178,15 @@ public enum PDataType {
 			return null;
 		}
 
-		@Override
-		public byte[] toBytes(Object object) {
-			return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_DOUBLE);
-		}
+        @Override
+        public byte[] toBytes(Object object) {
+            return toBytes(object, SortOrder.ASC);
+        }
+
+        @Override
+        public byte[] toBytes(Object object, SortOrder sortOrder) {
+            return pDataTypeForArray.toBytes(object, PDataType.UNSIGNED_DOUBLE, sortOrder);
+        }
 
 		@Override
 		public int toBytes(Object object, byte[] bytes, int offset) {
@@ -5134,19 +5204,23 @@ public enum PDataType {
 		}
 		
 		@Override
-        public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_DOUBLE);
-		}
-		
-		@Override
 		public Object toObject(byte[] bytes, int offset, int length,
-				PDataType actualType, SortOrder sortOrder) {
-			return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_DOUBLE, sortOrder);
+				PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+            return pDataTypeForArray.toObject(bytes, offset, length, PDataType.UNSIGNED_DOUBLE, sortOrder, maxLength,
+                    scale, PDataType.UNSIGNED_DOUBLE);
 		}
 		
 		@Override
         public boolean isCoercibleTo(PDataType targetType) {
             return pDataTypeForArray.isCoercibleTo(targetType, PDataType.UNSIGNED_DOUBLE_ARRAY);
+        }
+
+        @Override
+        public void coerceBytes(ImmutableBytesWritable ptr, Object object, PDataType actualType, Integer maxLength,
+                Integer scale, SortOrder actualModifer, Integer desiredMaxLength, Integer desiredScale,
+                SortOrder desiredModifier) {
+            pDataTypeForArray.coerceBytes(ptr, object, actualType, maxLength, scale, desiredMaxLength, desiredScale,
+                    this, actualModifer, desiredModifier);
         }
 		
 		@Override
@@ -5160,6 +5234,11 @@ public enum PDataType {
                }
            }
            return true;
+        }
+
+        @Override
+        public int getResultSetSqlType() {
+            return Types.ARRAY;
         }
 		
 	};
@@ -5175,6 +5254,7 @@ public enum PDataType {
     private final byte[] sqlTypeNameBytes;
     private final PDataCodec codec;
     final PArrayDataType pDataTypeForArray = new PArrayDataType();
+    
     private PDataType(String sqlTypeName, int sqlType, Class clazz, PDataCodec codec) {
         this.sqlTypeName = sqlTypeName;
         this.sqlType = sqlType;
@@ -6381,8 +6461,6 @@ public enum PDataType {
     private static final byte TRUE_BYTE = 1;
     public static final byte[] FALSE_BYTES = new byte[] {FALSE_BYTE};
     public static final byte[] TRUE_BYTES = new byte[] {TRUE_BYTE};
-    public static final byte[] INVERTED_FALSE_BYTES = SortOrder.invert(FALSE_BYTES, 0, new byte[FALSE_BYTES.length], 0, FALSE_BYTES.length);
-    public static final byte[] INVERTED_TRUE_BYTES = SortOrder.invert(TRUE_BYTES, 0, new byte[TRUE_BYTES.length], 0, TRUE_BYTES.length);
     public static final byte[] NULL_BYTES = ByteUtil.EMPTY_BYTE_ARRAY;
     private static final Integer BOOLEAN_LENGTH = 1;
 
@@ -6392,6 +6470,8 @@ public enum PDataType {
     public final static Integer SHORT_PRECISION = 5;
     public final static Integer BYTE_PRECISION = 3;
 
+    public static final int ARRAY_TYPE_BASE = 3000;
+    
     /**
      * Serialize a BigDecimal into a variable length byte array in such a way that it is
      * binary comparable.
@@ -6609,8 +6689,8 @@ public enum PDataType {
         return isCoercibleTo(targetType);
     }
 
-    public boolean isSizeCompatible(PDataType srcType, Object value, byte[] b,
-            Integer maxLength, Integer desiredMaxLength, Integer scale, Integer desiredScale) {
+    public boolean isSizeCompatible(ImmutableBytesWritable ptr, Object value, PDataType srcType,
+            Integer maxLength, Integer scale, Integer desiredMaxLength, Integer desiredScale) {
          return true;
     }
 
@@ -6618,11 +6698,11 @@ public enum PDataType {
         return compareTo(b1, 0, b1.length, SortOrder.getDefault(), b2, 0, b2.length, SortOrder.getDefault());
     }
 
-    public int compareTo(ImmutableBytesWritable ptr1, ImmutableBytesWritable ptr2) {
+    public final int compareTo(ImmutableBytesWritable ptr1, ImmutableBytesWritable ptr2) {
         return compareTo(ptr1.get(), ptr1.getOffset(), ptr1.getLength(), SortOrder.getDefault(), ptr2.get(), ptr2.getOffset(), ptr2.getLength(), SortOrder.getDefault());
     }
 
-    public int compareTo(byte[] ba1, int offset1, int length1, SortOrder so1, byte[] ba2, int offset2, int length2, SortOrder so2) {
+    public final int compareTo(byte[] ba1, int offset1, int length1, SortOrder so1, byte[] ba2, int offset2, int length2, SortOrder so2) {
     	Preconditions.checkNotNull(so1);
     	Preconditions.checkNotNull(so2);
         if (so1 != so2) {
@@ -6645,18 +6725,14 @@ public enum PDataType {
         return Bytes.compareTo(ba1, offset1, length1, ba2, offset2, length2) * (so1 == SortOrder.DESC ? -1 : 1);
     }
 
-    public int compareTo(ImmutableBytesWritable ptr1, SortOrder ptr1SortOrder, ImmutableBytesWritable ptr2, SortOrder ptr2SortOrder, PDataType type2) {
+    public final int compareTo(ImmutableBytesWritable ptr1, SortOrder ptr1SortOrder, ImmutableBytesWritable ptr2, SortOrder ptr2SortOrder, PDataType type2) {
         return compareTo(ptr1.get(), ptr1.getOffset(), ptr1.getLength(), ptr1SortOrder, ptr2.get(), ptr2.getOffset(), ptr2.getLength(), ptr2SortOrder, type2);
     }
 
-    public abstract int compareTo(Object lhs, Object rhs, PDataType rhsType);
-
-    public int compareTo(Object lhs, Object rhs) {
+    public final int compareTo(Object lhs, Object rhs) {
         return compareTo(lhs,rhs,this);
     }
 
-    public abstract boolean isFixedWidth();
-    public abstract Integer getByteSize();
 
     /*
      * We need an empty byte array to mean null, since
@@ -6667,8 +6743,6 @@ public enum PDataType {
         return value == null || value.length == 0;
     }
     
-    public abstract byte[] toBytes(Object object);
-    
     public byte[] toBytes(Object object, SortOrder sortOrder) {
     	Preconditions.checkNotNull(sortOrder);    	
     	byte[] bytes = toBytes(object);
@@ -6678,26 +6752,11 @@ public enum PDataType {
     	return bytes;
     }
 
-    /**
-     * Convert from the object representation of a data type value into
-     * the serialized byte form.
-     * @param object the object to convert
-     * @param bytes the byte array into which to put the serialized form of object
-     * @param offset the offset from which to start writing the serialized form
-     * @return the byte length of the serialized object
-     */
-    public abstract int toBytes(Object object, byte[] bytes, int offset);
-   
-//   TODO: we need one that coerces and inverts and scales
-//    public void coerceBytes(ImmutableBytesWritable ptr, PDataType actualType, 
-//            Integer actualMaxLength, Integer actualScale, SortOrder actualSortOrder,
-//            Integer desiredMaxLength, Integer desiredScale, SortOrder desiredSortOrder) {
-//        
-//    }
-    
-    public void coerceBytes(ImmutableBytesWritable ptr, PDataType actualType, SortOrder actualModifier, SortOrder expectedModifier) {
-    	Preconditions.checkNotNull(actualModifier);
-    	Preconditions.checkNotNull(expectedModifier);
+    public void coerceBytes(ImmutableBytesWritable ptr, Object o, PDataType actualType, 
+            Integer actualMaxLength, Integer actualScale, SortOrder actualModifier,
+            Integer desiredMaxLength, Integer desiredScale, SortOrder expectedModifier) {
+        Preconditions.checkNotNull(actualModifier);
+        Preconditions.checkNotNull(expectedModifier);
         if (ptr.getLength() == 0) {
             return;
         }
@@ -6711,25 +6770,64 @@ public enum PDataType {
             return;
         }
         
-        Object coercedValue = toObject(ptr, actualType, actualModifier);
-        byte[] b = toBytes(coercedValue, expectedModifier);
+        // Optimization for cases in which we already have the object around
+        if (o == null) {
+            o = actualType.toObject(ptr, actualType, actualModifier);
+        }
+        
+        o = toObject(o, actualType);
+        byte[] b = toBytes(o, expectedModifier);
         ptr.set(b);
     }
+    
+    public final void coerceBytes(ImmutableBytesWritable ptr, PDataType actualType, SortOrder actualModifier, SortOrder expectedModifier) {
+        coerceBytes(ptr, null, actualType, null, null, actualModifier, null, null, expectedModifier);
+    }
 
-    public byte[] coerceBytes(byte[] b, Object object, PDataType actualType) {
-        if (this.isBytesComparableWith(actualType)) { // No coerce necessary
-            return b;
-        } else { // TODO: optimize in specific cases
-            Object coercedValue = toObject(object, actualType);
-            return toBytes(coercedValue);
+    public final void coerceBytes(ImmutableBytesWritable ptr, PDataType actualType, SortOrder actualModifier,
+            SortOrder expectedModifier, Integer desiredMaxLength) {
+        coerceBytes(ptr, null, actualType, null, null, actualModifier, desiredMaxLength, null, expectedModifier);
+    }
+
+    private static Void throwConstraintViolationException(PDataType source, PDataType target) {
+        throw new ConstraintViolationException(source + " cannot be coerced to " + target);
+    }
+    
+    private static boolean isNonNegativeDate(java.util.Date date) {
+        return (date == null || date.getTime() >= 0);
+    }
+    
+    private static void throwIfNonNegativeDate(java.util.Date date) {
+        if (!isNonNegativeDate(date)) {
+            throw new IllegalDataException("Value may not be negative(" + date + ")");
         }
     }
-
-    public byte[] coerceBytes(byte[] b, Object object, PDataType actualType, Integer maxLength, Integer scale,
-            Integer desiredMaxLength, Integer desiredScale) {
-        return coerceBytes(b, object, actualType);
+    
+    private static boolean isNonNegativeNumber(Number v) {
+        return v == null || v.longValue() >= 0;
     }
 
+    private static void throwIfNonNegativeNumber(Number v) {
+        if (!isNonNegativeNumber(v)) {
+            throw new IllegalDataException("Value may not be negative(" + v + ")");
+        }
+    }
+    
+    public abstract Integer getByteSize();
+    public abstract boolean isFixedWidth();
+    public abstract int compareTo(Object lhs, Object rhs, PDataType rhsType);
+
+    /**
+     * Convert from the object representation of a data type value into
+     * the serialized byte form.
+     * @param object the object to convert
+     * @param bytes the byte array into which to put the serialized form of object
+     * @param offset the offset from which to start writing the serialized form
+     * @return the byte length of the serialized object
+     */
+    public abstract int toBytes(Object object, byte[] bytes, int offset);
+    public abstract byte[] toBytes(Object object);
+       
     /**
      * Convert from a string to the object representation of a given type
      * @param value a stringified value
@@ -6737,59 +6835,62 @@ public enum PDataType {
      */
     public abstract Object toObject(String value);
     
-    public Object toObject(Object object, PDataType actualType) {
-        if (this == actualType) {
-            return object;
-        }
-        throw new IllegalDataException("Cannot convert from " + actualType + " to " + this);
+    /*
+     * Each enum must override this to define the set of object it may be coerced to
+     */
+    public abstract Object toObject(Object object, PDataType actualType);
+    /*
+     * Each enum must override this to define the set of objects it may create
+     */
+    public abstract Object toObject(byte[] bytes, int offset, int length, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale);
+    
+    public final Object toObject(byte[] bytes, int offset, int length, PDataType actualType, SortOrder sortOrder) {
+        return toObject(bytes, offset, length, actualType, sortOrder, null, null);
     }
-
-    public Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
+    
+    public final Object toObject(byte[] bytes, int offset, int length, PDataType actualType) {
         return toObject(bytes, offset, length, actualType, SortOrder.getDefault());
     }
     
-    public Object toObject(byte[] bytes, int offset, int length, PDataType actualType, SortOrder sortOrder) {
-    	Preconditions.checkNotNull(sortOrder);    	
-    	if (actualType == null) {
-            return null;
-        }
-    	if (sortOrder == SortOrder.DESC) {
-    	    bytes = SortOrder.invert(bytes, offset, new byte[length], 0, length);
-    	    offset = 0;
-    	}
-        Object o = actualType.toObject(bytes, offset, length);
-        return this.toObject(o, actualType);
-    }
-    
-    public Object toObject(ImmutableBytesWritable ptr, PDataType actualType) {
+    public final Object toObject(ImmutableBytesWritable ptr, PDataType actualType) {
         return toObject(ptr, actualType, SortOrder.getDefault());
     }    
     
-    public Object toObject(ImmutableBytesWritable ptr, PDataType actualType, SortOrder sortOrder) {
-    	Preconditions.checkNotNull(sortOrder);
+    public final Object toObject(ImmutableBytesWritable ptr, PDataType actualType, SortOrder sortOrder) {
         return this.toObject(ptr.get(), ptr.getOffset(), ptr.getLength(), actualType, sortOrder);
     }
     
-
-    public Object toObject(ImmutableBytesWritable ptr) {
+    public final Object toObject(ImmutableBytesWritable ptr, PDataType actualType, SortOrder sortOrder, Integer maxLength, Integer scale) {
+        return this.toObject(ptr.get(), ptr.getOffset(), ptr.getLength(), actualType, sortOrder, maxLength, scale);
+    }
+    
+    public final Object toObject(ImmutableBytesWritable ptr, SortOrder sortOrder, Integer maxLength, Integer scale) {
+        return this.toObject(ptr.get(), ptr.getOffset(), ptr.getLength(), this, sortOrder, maxLength, scale);
+    }
+    
+    public final Object toObject(ImmutableBytesWritable ptr) {
         return toObject(ptr.get(), ptr.getOffset(), ptr.getLength());
     }
     
-    public Object toObject(ImmutableBytesWritable ptr, SortOrder sortOrder) {
+    public final Object toObject(ImmutableBytesWritable ptr, SortOrder sortOrder) {
         return toObject(ptr.get(), ptr.getOffset(), ptr.getLength(), this, sortOrder);        
     }    
 
-    public Object toObject(byte[] bytes, int offset, int length) {
+    public final Object toObject(byte[] bytes, int offset, int length) {
         return toObject(bytes, offset, length, this);
     }
     
 
-    public Object toObject(byte[] bytes) {
+    public final Object toObject(byte[] bytes) {
         return toObject(bytes, SortOrder.getDefault());
     }
 
-    public Object toObject(byte[] bytes, SortOrder sortOrder) {
+    public final Object toObject(byte[] bytes, SortOrder sortOrder) {
         return toObject(bytes, 0, bytes.length, this, sortOrder);
+    }
+
+    public final Object toObject(byte[] bytes, SortOrder sortOrder, PDataType actualType) {
+        return toObject(bytes, 0, bytes.length, actualType, sortOrder);
     }
 
     private static final Map<String, PDataType> SQL_TYPE_NAME_TO_PCOLUMN_DATA_TYPE;
@@ -6812,7 +6913,7 @@ public enum PDataType {
     
     public static int sqlArrayType(String sqlTypeName) {
     	PDataType fromSqlTypeName = fromSqlTypeName(sqlTypeName);
-    	return fromSqlTypeName.getSqlType() + Types.ARRAY;
+    	return fromSqlTypeName.getSqlType() + PDataType.ARRAY_TYPE_BASE;
     }
 
     private static final int SQL_TYPE_OFFSET;
@@ -6864,7 +6965,7 @@ public enum PDataType {
 			}
 		}
 	}
-	public static PDataType fromTypeId(Integer typeId) {
+	public static PDataType fromTypeId(int typeId) {
 		int offset = typeId - SQL_TYPE_OFFSET;
 		if (offset >= 0 && offset < SQL_TYPE_TO_PCOLUMN_DATA_TYPE.length) {
 			PDataType type = SQL_TYPE_TO_PCOLUMN_DATA_TYPE[offset];
@@ -6908,10 +7009,10 @@ public enum PDataType {
         return getKeyRange(point, true, point, true);
     }
     
-    public String toStringLiteral(ImmutableBytesWritable ptr, Format formatter) {
+    public final String toStringLiteral(ImmutableBytesWritable ptr, Format formatter) {
         return toStringLiteral(ptr.get(),ptr.getOffset(),ptr.getLength(),formatter);
     }
-    public String toStringLiteral(byte[] b, Format formatter) {
+    public final String toStringLiteral(byte[] b, Format formatter) {
         return toStringLiteral(b,0,b.length,formatter);
     }
     public String toStringLiteral(byte[] b, int offset, int length, Format formatter) {
@@ -6957,7 +7058,7 @@ public enum PDataType {
 		for (PDataType type : PDataType.values()) {
 			if (type.isArrayType()) {
 				PhoenixArray arr = (PhoenixArray) value;
-				if ((type.getSqlType() == arr.baseType.sqlType + Types.ARRAY)
+				if ((type.getSqlType() == arr.baseType.sqlType + PDataType.ARRAY_TYPE_BASE)
 						&& type.getJavaClass().isInstance(value)) {
 					return type;
 				}
@@ -6976,6 +7077,10 @@ public enum PDataType {
     
     public long getMillis(ImmutableBytesWritable ptr, SortOrder sortOrder) {
         throw new UnsupportedOperationException("Operation not supported for type " + this);
+    }
+
+    public Object pad(Object object, int maxLength) {
+        return object;
     }
     
 }

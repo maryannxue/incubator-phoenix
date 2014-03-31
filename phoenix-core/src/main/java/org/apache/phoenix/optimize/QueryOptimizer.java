@@ -43,7 +43,6 @@ import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PDatum;
 import org.apache.phoenix.schema.PIndexState;
 import org.apache.phoenix.schema.PTable;
-import org.apache.phoenix.schema.PTable.ViewType;
 import org.apache.phoenix.schema.PTableType;
 
 import com.google.common.collect.Lists;
@@ -222,7 +221,7 @@ public class QueryOptimizer {
      *    b) the plan that preserves ordering for a group by.
      *    c) the data table plan
      * @param plans the list of candidate plans
-     * @return
+     * @return QueryPlan
      */
     private QueryPlan chooseBestPlan(SelectStatement select, List<QueryPlan> plans) {
         final QueryPlan dataPlan = plans.get(0);
@@ -266,7 +265,7 @@ public class QueryOptimizer {
         
         int nViewConstants = 0;
         PTable dataTable = dataPlan.getTableRef().getTable();
-        if (dataTable.getViewType() == ViewType.UPDATABLE) {
+        if (dataTable.getType() == PTableType.VIEW) {
             for (PColumn column : dataTable.getColumns()) {
                 if (column.getViewConstant() != null) {
                     nViewConstants++;

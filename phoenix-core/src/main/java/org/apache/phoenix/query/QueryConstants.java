@@ -70,6 +70,7 @@ import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.TYPE_NAME;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.TYPE_SEQUENCE;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.VIEW_CONSTANT;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.VIEW_INDEX_ID;
+import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.IS_VIEW_REFERENCED;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.VIEW_STATEMENT;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.VIEW_TYPE;
 
@@ -83,6 +84,7 @@ import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.schema.MetaDataSplitPolicy;
 import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.PNameFactory;
+import org.apache.phoenix.util.ByteUtil;
 
 
 /**
@@ -117,9 +119,9 @@ public interface QueryConstants {
     public final static PName AGG_COLUMN_NAME = SINGLE_COLUMN_NAME;
     public final static PName AGG_COLUMN_FAMILY_NAME = SINGLE_COLUMN_FAMILY_NAME;
     
-    public static final byte[] ARRAY_VALUE_COLUMN_FAMILY = Bytes.toBytes("_a");
-    // TODO: use empty byte array so as not to accidentally conflict with any other columns
-    public static final byte[] ARRAY_VALUE_COLUMN_QUALIFIER = ARRAY_VALUE_COLUMN_FAMILY;
+    public static final byte[] ARRAY_VALUE_COLUMN_FAMILY = Bytes.toBytes("a");
+    // Use empty byte array for column qualifier so as not to accidentally conflict with any other columns
+    public static final byte[] ARRAY_VALUE_COLUMN_QUALIFIER = ByteUtil.EMPTY_BYTE_ARRAY;
 
     public static final byte[] TRUE = new byte[] {1};
 
@@ -149,27 +151,20 @@ public interface QueryConstants {
     public static final double MILLIS_TO_NANOS_CONVERTOR = Math.pow(10, 6);
     public static final BigDecimal BD_MILLIS_NANOS_CONVERSION = BigDecimal.valueOf(MILLIS_TO_NANOS_CONVERTOR);
     public static final BigDecimal BD_MILLIS_IN_DAY = BigDecimal.valueOf(QueryConstants.MILLIS_IN_DAY);
-    public static final String SPECIFIC_ARRAY_INDEX = "SpecificArrayIndex";
-
     public static final String CREATE_TABLE_METADATA =
-            // Do not use IF NOT EXISTS as we sometimes catch the TableAlreadyExists exception
-            // and add columns to the SYSTEM.TABLE dynamically.
+            // Do not use IF NOT EXISTS as we sometimes catch the TableAlreadyExists
+            // exception and add columns to the SYSTEM.TABLE dynamically.
             "CREATE TABLE " + SYSTEM_CATALOG_SCHEMA + ".\"" + SYSTEM_CATALOG_TABLE + "\"(\n" +
             // PK columns
             TENANT_ID + " VARCHAR NULL," +
             TABLE_SCHEM + " VARCHAR NULL," +
             TABLE_NAME + " VARCHAR NOT NULL," +
-            COLUMN_NAME + " VARCHAR NULL," + // null only for table row
-            COLUMN_FAMILY + " VARCHAR NULL," + // using for CF - ensures uniqueness for columns
+            COLUMN_NAME + " VARCHAR NULL," + // null for table row
+            COLUMN_FAMILY + " VARCHAR NULL," + // using for CF to uniqueness for columns
             // Table metadata (will be null for column rows)
-            TABLE_TYPE + " CHAR(1)," +
-            REMARKS + " VARCHAR," +
-            DATA_TYPE + " INTEGER," +
-            PK_NAME + " VARCHAR," +
-            TYPE_NAME + " VARCHAR," +
-            SELF_REFERENCING_COL_NAME + " VARCHAR," +
-            REF_GENERATION + " VARCHAR," +
             TABLE_SEQ_NUM + " BIGINT," +
+            TABLE_TYPE + " CHAR(1)," +
+            PK_NAME + " VARCHAR," +
             COLUMN_COUNT + " INTEGER," +
             SALT_BUCKETS + " INTEGER," +
             DATA_TABLE_NAME + " VARCHAR," +
@@ -182,28 +177,35 @@ public interface QueryConstants {
             VIEW_TYPE + " UNSIGNED_TINYINT,\n" +
             VIEW_INDEX_ID + " SMALLINT,\n" +
             // Column metadata (will be null for table row)
+            DATA_TYPE + " INTEGER," +
             COLUMN_SIZE + " INTEGER," +
-            BUFFER_LENGTH + " INTEGER," +
             DECIMAL_DIGITS + " INTEGER," +
-            NUM_PREC_RADIX + " INTEGER," +
             NULLABLE + " INTEGER," +
+            ORDINAL_POSITION + " INTEGER," +
+            SORT_ORDER + " INTEGER," +
+            ARRAY_SIZE + " INTEGER,\n" +
+            VIEW_CONSTANT + " VARBINARY,\n" +
+            IS_VIEW_REFERENCED + " BOOLEAN,\n" +
+            KEY_SEQ + " SMALLINT,\n" +
+            // Link metadata (only set on rows linking table to index or view)
+            LINK_TYPE + " UNSIGNED_TINYINT,\n" +
+            // Unused
+            TYPE_NAME + " VARCHAR," +
+            REMARKS + " VARCHAR," +
+            SELF_REFERENCING_COL_NAME + " VARCHAR," + 
+            REF_GENERATION + " VARCHAR," +
+            BUFFER_LENGTH + " INTEGER," +
+            NUM_PREC_RADIX + " INTEGER," +
             COLUMN_DEF + " VARCHAR," +
             SQL_DATA_TYPE + " INTEGER," +
             SQL_DATETIME_SUB + " INTEGER," +
             CHAR_OCTET_LENGTH + " INTEGER," +
-            ORDINAL_POSITION + " INTEGER," +
             IS_NULLABLE + " VARCHAR," +
             SCOPE_CATALOG + " VARCHAR," +
             SCOPE_SCHEMA + " VARCHAR," +
             SCOPE_TABLE + " VARCHAR," +
             SOURCE_DATA_TYPE + " SMALLINT," +
             IS_AUTOINCREMENT + " VARCHAR," +
-            SORT_ORDER + " INTEGER," +
-            ARRAY_SIZE + " INTEGER,\n" +
-            VIEW_CONSTANT + " VARBINARY,\n" +
-            KEY_SEQ + " SMALLINT,\n" +
-            // Link metadata (only set on rows linking table to index or view)
-            LINK_TYPE + " UNSIGNED_TINYINT,\n" +
             "CONSTRAINT " + SYSTEM_TABLE_PK_NAME + " PRIMARY KEY (" + TENANT_ID + ","
             + TABLE_SCHEM + "," + TABLE_NAME + "," + COLUMN_NAME + "," + COLUMN_FAMILY + "))\n" +
             HConstants.VERSIONS + "=" + MetaDataProtocol.DEFAULT_MAX_META_DATA_VERSIONS + ",\n" +
@@ -217,7 +219,7 @@ public interface QueryConstants {
             START_WITH + " BIGINT NOT NULL, \n" + 
     		CURRENT_VALUE + " BIGINT NOT NULL, \n" + 
             INCREMENT_BY  + " BIGINT NOT NULL, \n" + 
-            CACHE_SIZE  + " INTEGER NOT NULL \n" + 
+            CACHE_SIZE  + " BIGINT NOT NULL \n" + 
     		" CONSTRAINT " + SYSTEM_TABLE_PK_NAME + " PRIMARY KEY (" + TENANT_ID + "," + SEQUENCE_SCHEMA + "," + SEQUENCE_NAME + "))\n" + 
     		HConstants.VERSIONS + "=" + MetaDataProtocol.DEFAULT_MAX_META_DATA_VERSIONS + "\n";
 	

@@ -17,7 +17,7 @@
  */
 package org.apache.phoenix.util;
 
-import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CATALOG_BYTES;
+import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CATALOG_NAME_BYTES;
 
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -52,8 +52,6 @@ import org.apache.phoenix.schema.SaltingUtil;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.ValueSchema.Field;
 
-
-
 /**
  * 
  * Static class for various schema-related utilities
@@ -75,11 +73,6 @@ public class SchemaUtil {
         @Override
         public PDataType getDataType() {
             return PDataType.VARBINARY;
-        }
-    
-        @Override
-        public Integer getByteSize() {
-            return null;
         }
     
         @Override
@@ -122,8 +115,9 @@ public class SchemaUtil {
         List<PColumn> columns = table.getPKColumns();
         while (i < columns.size()) {
             PColumn keyColumn = columns.get(i++);
-            Integer byteSize = keyColumn.getByteSize();
-            maxKeyLength += (byteSize == null) ? VAR_LENGTH_ESTIMATE : byteSize;
+            PDataType type = keyColumn.getDataType();
+            Integer maxLength = keyColumn.getMaxLength();
+            maxKeyLength += !type.isFixedWidth() ? VAR_LENGTH_ESTIMATE : maxLength == null ? type.getByteSize() : maxLength;
         }
         return maxKeyLength;
     }
@@ -345,7 +339,7 @@ public class SchemaUtil {
     }
 
     public static boolean isMetaTable(byte[] tableName) {
-        return Bytes.compareTo(tableName, SYSTEM_CATALOG_BYTES) == 0;
+        return Bytes.compareTo(tableName, SYSTEM_CATALOG_NAME_BYTES) == 0;
     }
     
     public static boolean isSequenceTable(byte[] tableName) {
@@ -392,7 +386,7 @@ public class SchemaUtil {
         while (pos < pkColumns.size()) {
             PColumn column = iterator.next();
             if (column.getDataType().isFixedWidth()) { // Fixed width
-                int length = column.getByteSize();
+                int length = SchemaUtil.getFixedByteSize(column);
                 if (maxOffset - offset < length) {
                     // The split truncates the field. Fill in the rest of the part and any fields that
                     // are missing after this field.
@@ -431,7 +425,7 @@ public class SchemaUtil {
         while (iterator.hasNext()) {
             PColumn column = iterator.next();
             if (column.getDataType().isFixedWidth()) {
-                length += column.getByteSize();
+                length += SchemaUtil.getFixedByteSize(column);
             } else {
                 length += 1; // SEPARATOR byte.
             }
@@ -439,9 +433,6 @@ public class SchemaUtil {
         return length;
     }
     
-    public static final String UPGRADE_TO_2_0 = "UpgradeTo20";
-    public static final String UPGRADE_TO_2_1 = "UpgradeTo21";
-
     public static String getEscapedTableName(String schemaName, String tableName) {
         if (schemaName == null || schemaName.length() == 0) {
             return "\"" + tableName + "\"";
@@ -541,17 +532,25 @@ public class SchemaUtil {
         return maxKeyLength;
     }
 
+    public static int getFixedByteSize(PDatum e) {
+        assert(e.getDataType().isFixedWidth());
+        Integer maxLength = e.getMaxLength();
+        return maxLength == null ? e.getDataType().getByteSize() : maxLength;
+    }
+    
     public static short getMaxKeySeq(PTable table) {
         int offset = 0;
         if (table.getBucketNum() != null) {
             offset++;
         }
-        if (table.isMultiTenant()) {
-            offset++;
-        }
-        if (table.getViewIndexId() != null) {
-            offset++;
-        }
+        // TODO: for tenant-specific table on tenant-specific connection,
+        // we should subtract one for tenant column and another one for
+        // index ID
         return (short)(table.getPKColumns().size() - offset);
+    }
+
+    public static int getPKPosition(PTable table, PColumn column) {
+        // TODO: when PColumn has getPKPosition, use that instead
+        return table.getPKColumns().indexOf(column);
     }
 }

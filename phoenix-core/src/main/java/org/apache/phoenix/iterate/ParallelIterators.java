@@ -33,8 +33,8 @@ import org.apache.phoenix.compile.*;
 import org.apache.phoenix.filter.ColumnProjectionFilter;
 import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.job.JobManager.JobCallable;
-import org.apache.phoenix.parse.FilterableStatement;
-import org.apache.phoenix.parse.HintNode;
+import org.apache.phoenix.parse.*;
+import org.apache.phoenix.parse.HintNode.Hint;
 import org.apache.phoenix.query.*;
 import org.apache.phoenix.schema.*;
 import org.apache.phoenix.schema.PTable.ViewType;
@@ -100,29 +100,21 @@ public class ParallelIterators extends ExplainTable implements ResultIterators {
                     scan.addColumn(ecf, QueryConstants.EMPTY_COLUMN_BYTES);
                 }
             }
-        }
-        if (limit != null) {
-            ScanUtil.andFilterAtEnd(scan, new PageFilter(limit));
-        }
-
-        if (!(statement.isAggregate())) {
-            doColumnProjectionOptimization(context, scan, table);
-        } else {
-            // TODO avoid code duplication.
-            for (Pair<byte[], byte[]> whereCol : context.getWhereCoditionColumns()) {
-                scan.addColumn(whereCol.getFirst(), whereCol.getSecond());
-            }
-            if (table.getViewType() == ViewType.MAPPED) {
+        } else if (table.getViewType() == ViewType.MAPPED) {
                 // Since we don't have the empty key value in MAPPED tables, we must select all CFs in HRS. But only the
                 // selected column values are returned back to client
                 for (PColumnFamily family : table.getColumnFamilies()) {
                     scan.addFamily(family.getName().getBytes());
                 }
-            }
+        } // TODO adding all CFs here is not correct. It should be done only after ColumnProjectionOptimization.
+        if (limit != null) {
+            ScanUtil.andFilterAtEnd(scan, new PageFilter(limit));
         }
+
+        doColumnProjectionOptimization(context, scan, table, statement);
     }
 
-    private void doColumnProjectionOptimization(StatementContext context, Scan scan, PTable table) {
+    private void doColumnProjectionOptimization(StatementContext context, Scan scan, PTable table, FilterableStatement statement) {
         Map<byte[], NavigableSet<byte[]>> familyMap = scan.getFamilyMap();
         if (familyMap != null && !familyMap.isEmpty()) {
             // columnsTracker contain cf -> qualifiers which should get returned.
@@ -135,9 +127,17 @@ public class ParallelIterators extends ExplainTable implements ResultIterators {
                     referencedCfCount++;
                 }
             }
-            boolean useOptimization = referencedCfCount == 1;
-            // when referencedCfCount is >1 we are not using the optimization as of now
-            // TODO support adding a HINT in query so that in case of cf count>1 also, this optimization can be applied.
+            boolean useOptimization;
+            if (statement.getHint().hasHint(Hint.SEEK_TO_COLUMN)) {
+                // Do not use the optimization
+                useOptimization = false;
+            } else if (statement.getHint().hasHint(Hint.NO_SEEK_TO_COLUMN)) {
+                // Strictly use the optimization
+                useOptimization = true;
+            } else {
+                // when referencedCfCount is >1 and no Hints, we are not using the optimization
+                useOptimization = referencedCfCount == 1;
+            }
             if (useOptimization) {
                 for (Entry<byte[], NavigableSet<byte[]>> entry : familyMap.entrySet()) {
                     ImmutableBytesPtr cf = new ImmutableBytesPtr(entry.getKey());
@@ -160,7 +160,21 @@ public class ParallelIterators extends ExplainTable implements ResultIterators {
                         conditionOnlyCfs.add(whereCol.getFirst());
                     }
                 } else {
-                    scan.addColumn(whereCol.getFirst(), whereCol.getSecond());
+                    if (familyMap.containsKey(whereCol.getFirst())) {
+                        // where column's CF is present. If there are some specific columns added against this CF, we
+                        // need to ensure this where column also getting added in it.
+                        // If the select was like select cf1.*, then that itself will select the whole CF. So no need to
+                        // specifically add the where column. Adding that will remove the cf1.* stuff and only this
+                        // where condition column will get returned!
+                        NavigableSet<byte[]> cols = familyMap.get(whereCol.getFirst());
+                        // cols is null means the whole CF will get scanned.
+                        if (cols != null) {
+                            scan.addColumn(whereCol.getFirst(), whereCol.getSecond());
+                        }
+                    } else {
+                        // where column's CF itself is not present in family map. We need to add the column
+                        scan.addColumn(whereCol.getFirst(), whereCol.getSecond());
+                    }
                 }
             }
             if (useOptimization && !columnsTracker.isEmpty()) {
@@ -169,14 +183,12 @@ public class ParallelIterators extends ExplainTable implements ResultIterators {
                     // We don't want the ExplicitColumnTracker to be used. Instead we have the ColumnProjectionFilter
                     scan.addFamily(f.get());
                 }
-                ScanUtil.andFilterAtEnd(scan, new ColumnProjectionFilter(SchemaUtil.getEmptyColumnFamily(table),
-                        columnsTracker, conditionOnlyCfs));
-            }
-            if (table.getViewType() == ViewType.MAPPED) {
-                // Since we don't have the empty key value in MAPPED tables, we must select all CFs in HRS. But only the
-                // selected column values are returned back to client
-                for (PColumnFamily family : table.getColumnFamilies()) {
-                    scan.addFamily(family.getName().getBytes());
+                // We don't need this filter for aggregates, as we're not returning back what's
+                // in the scan in this case. We still want the other optimization that causes
+                // the ExplicitColumnTracker not to be used, though.
+                if (!(statement.isAggregate())) {
+                    ScanUtil.andFilterAtEnd(scan, new ColumnProjectionFilter(SchemaUtil.getEmptyColumnFamily(table),
+                            columnsTracker, conditionOnlyCfs));
                 }
             }
         }

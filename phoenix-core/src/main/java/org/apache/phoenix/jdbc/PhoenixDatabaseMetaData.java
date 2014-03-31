@@ -36,10 +36,12 @@ import org.apache.phoenix.coprocessor.MetaDataProtocol;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.SQLExceptionInfo;
 import org.apache.phoenix.expression.RowKeyColumnExpression;
+import org.apache.phoenix.expression.function.ExternalSqlTypeIdFunction;
 import org.apache.phoenix.expression.function.IndexStateNameFunction;
 import org.apache.phoenix.expression.function.SQLTableTypeFunction;
 import org.apache.phoenix.expression.function.SQLViewTypeFunction;
 import org.apache.phoenix.expression.function.SqlTypeNameFunction;
+import org.apache.phoenix.hbase.index.util.VersionUtil;
 import org.apache.phoenix.iterate.MaterializedResultIterator;
 import org.apache.phoenix.iterate.ResultIterator;
 import org.apache.phoenix.parse.HintNode.Hint;
@@ -55,7 +57,6 @@ import org.apache.phoenix.schema.tuple.SingleKeyValueTuple;
 import org.apache.phoenix.schema.tuple.Tuple;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.KeyValueUtil;
-import org.apache.phoenix.util.MetaDataUtil;
 import org.apache.phoenix.util.SchemaUtil;
 
 import com.google.common.collect.Lists;
@@ -102,7 +103,7 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData, org.apache.pho
     public static final byte[] SYSTEM_CATALOG_SCHEMA_BYTES = Bytes.toBytes(SYSTEM_CATALOG_TABLE);
     public static final byte[] SYSTEM_CATALOG_TABLE_BYTES = Bytes.toBytes(SYSTEM_CATALOG_SCHEMA);
     public static final String SYSTEM_CATALOG_NAME = SchemaUtil.getTableName(SYSTEM_CATALOG_SCHEMA, SYSTEM_CATALOG_TABLE);
-    public static final byte[] SYSTEM_CATALOG_BYTES = SchemaUtil.getTableNameAsBytes(SYSTEM_CATALOG_TABLE_BYTES, SYSTEM_CATALOG_SCHEMA_BYTES);
+    public static final byte[] SYSTEM_CATALOG_NAME_BYTES = SchemaUtil.getTableNameAsBytes(SYSTEM_CATALOG_TABLE_BYTES, SYSTEM_CATALOG_SCHEMA_BYTES);
     
     public static final String SYSTEM_CATALOG_ALIAS = "\"SYSTEM.TABLE\"";
 
@@ -179,6 +180,8 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData, org.apache.pho
     public static final byte[] ARRAY_SIZE_BYTES = Bytes.toBytes(ARRAY_SIZE);
     public static final String VIEW_CONSTANT = "VIEW_CONSTANT";
     public static final byte[] VIEW_CONSTANT_BYTES = Bytes.toBytes(VIEW_CONSTANT);
+    public static final String IS_VIEW_REFERENCED = "IS_VIEW_REFERENCED";
+    public static final byte[] IS_VIEW_REFERENCED_BYTES = Bytes.toBytes(IS_VIEW_REFERENCED);
     public static final String VIEW_INDEX_ID = "VIEW_INDEX_ID";
     public static final byte[] VIEW_INDEX_ID_BYTES = Bytes.toBytes(VIEW_INDEX_ID);
 
@@ -203,16 +206,17 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData, org.apache.pho
     public static final byte[] KEY_SEQ_BYTES = Bytes.toBytes(KEY_SEQ);
     public static final String SUPERTABLE_NAME = "SUPERTABLE_NAME";
     		
+    public static final String TYPE_ID = "TYPE_ID";
     
     private final PhoenixConnection connection;
     private final ResultSet emptyResultSet;
 
     // Version below which we should turn off essential column family.
-    public static final int ESSENTIAL_FAMILY_VERSION_THRESHOLD = MetaDataUtil.encodeVersion("0", "94", "7");
+    public static final int ESSENTIAL_FAMILY_VERSION_THRESHOLD = VersionUtil.encodeVersion("0", "94", "7");
     // Version below which we should disallow usage of mutable secondary indexing.
-    public static final int MUTABLE_SI_VERSION_THRESHOLD = MetaDataUtil.encodeVersion("0", "94", "10");
+    public static final int MUTABLE_SI_VERSION_THRESHOLD = VersionUtil.encodeVersion("0", "94", "10");
     /** Version below which we fall back on the generic KeyValueBuilder */
-    public static final int CLIENT_KEY_VALUE_BUILDER_THRESHOLD = MetaDataUtil.encodeVersion("0", "94", "14");
+    public static final int CLIENT_KEY_VALUE_BUILDER_THRESHOLD = VersionUtil.encodeVersion("0", "94", "14");
 
     PhoenixDatabaseMetaData(PhoenixConnection connection) throws SQLException {
         this.emptyResultSet = new PhoenixResultSet(ResultIterator.EMPTY_ITERATOR, RowProjector.EMPTY_PROJECTOR, new PhoenixStatement(connection));
@@ -339,7 +343,7 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData, org.apache.pho
                 TABLE_SCHEM + "," +
                 TABLE_NAME + " ," +
                 COLUMN_NAME + "," +
-                DATA_TYPE + "," +
+                ExternalSqlTypeIdFunction.NAME + "(" + DATA_TYPE + ") AS " + DATA_TYPE + "," +
                 SqlTypeNameFunction.NAME + "(" + DATA_TYPE + ") AS " + TYPE_NAME + "," +
                 COLUMN_SIZE + "," +
                 BUFFER_LENGTH + "," +
@@ -359,7 +363,8 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData, org.apache.pho
                 IS_AUTOINCREMENT + "," + 
                 ARRAY_SIZE + "," +
                 COLUMN_FAMILY + "," +
-                VIEW_CONSTANT + 
+                DATA_TYPE + " " + TYPE_ID + "," +// raw type id for potential internal consumption
+                VIEW_CONSTANT +
                 " from " + SYSTEM_CATALOG + " " + SYSTEM_CATALOG_ALIAS);
         StringBuilder where = new StringBuilder();
         addTenantIdFilter(where, catalog);
@@ -511,8 +516,10 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData, org.apache.pho
                 "null CARDINALITY,\n" +
                 "null PAGES,\n" +
                 "null FILTER_CONDITION,\n" +
-                DATA_TYPE + ",\n" + // Include data type info, though not in spec
+                // Include data type info, though not in spec
+                ExternalSqlTypeIdFunction.NAME + "(" + DATA_TYPE + ") AS " + DATA_TYPE + ",\n" +
                 SqlTypeNameFunction.NAME + "(" + DATA_TYPE + ") AS " + TYPE_NAME + ",\n" +
+                DATA_TYPE + " " + TYPE_ID + ",\n" + 
                 COLUMN_FAMILY + ",\n" +
                 COLUMN_SIZE + ",\n" +
                 ARRAY_SIZE +
@@ -656,9 +663,10 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData, org.apache.pho
                 KEY_SEQ + "," +
                 PK_NAME + "," +
                 "CASE WHEN " + SORT_ORDER + " = " + (SortOrder.DESC.getSystemValue()) + " THEN 'D' ELSE 'A' END ASC_OR_DESC," +
-                DATA_TYPE + "," + // include type info, though not in spec
+                ExternalSqlTypeIdFunction.NAME + "(" + DATA_TYPE + ") AS " + DATA_TYPE + "," +
                 SqlTypeNameFunction.NAME + "(" + DATA_TYPE + ") AS " + TYPE_NAME + "," +
                 COLUMN_SIZE + "," +
+                DATA_TYPE + " " + TYPE_ID + "," + // raw type id
                 VIEW_CONSTANT + 
                 " from " + SYSTEM_CATALOG + " " + SYSTEM_CATALOG_ALIAS +
                 " where ");
@@ -790,10 +798,6 @@ public class PhoenixDatabaseMetaData implements DatabaseMetaData, org.apache.pho
         @Override
         public PDataType getDataType() {
             return PDataType.VARCHAR;
-        }
-        @Override
-        public Integer getByteSize() {
-            return null;
         }
         @Override
         public Integer getMaxLength() {

@@ -30,6 +30,7 @@ import static org.junit.Assert.fail;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Collections;
@@ -38,7 +39,7 @@ import java.util.Properties;
 
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.phoenix.coprocessor.GroupedAggregateRegionObserver;
+import org.apache.phoenix.coprocessor.BaseScannerRegionObserver;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.expression.aggregator.Aggregator;
 import org.apache.phoenix.expression.aggregator.CountAggregator;
@@ -51,10 +52,12 @@ import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.schema.AmbiguousColumnException;
 import org.apache.phoenix.schema.ColumnAlreadyExistsException;
 import org.apache.phoenix.schema.ColumnNotFoundException;
+import org.apache.phoenix.schema.ConstraintViolationException;
 import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PTableKey;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
+import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TestUtil;
 import org.junit.Test;
@@ -155,7 +158,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
     }
 
     @Test
-    public void testVarBinaryInMultipartPK() throws Exception {
+    public void testVarBinaryNotLastInMultipartPK() throws Exception {
         Connection conn = DriverManager.getConnection(getUrl());
         // When the VARBINARY key is the last column, it is allowed.
         String query = "CREATE TABLE foo (a_string varchar not null, b_string varchar not null, a_binary varbinary not null, " +
@@ -169,7 +172,28 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             statement.execute();
             fail();
         } catch (SQLException e) {
-            assertTrue(e.getMessage(), e.getMessage().contains("ERROR 1005 (42J03): The VARBINARY type can only be used as the last part of a multi-part row key. columnName=FOO.A_BINARY"));
+            assertEquals(SQLExceptionCode.VARBINARY_IN_ROW_KEY.getErrorCode(), e.getErrorCode());
+        } finally {
+            conn.close();
+        }
+    }
+
+    @Test
+    public void testArrayNotLastInMultipartPK() throws Exception {
+        Connection conn = DriverManager.getConnection(getUrl());
+        // When the VARBINARY key is the last column, it is allowed.
+        String query = "CREATE TABLE foo (a_string varchar not null, b_string varchar not null, a_array varchar[] not null, " +
+                "col1 decimal, col2 decimal CONSTRAINT pk PRIMARY KEY (a_string, b_string, a_array))";
+        PreparedStatement statement = conn.prepareStatement(query);
+        statement.execute();
+        try {
+            // VARBINARY key is not allowed in the middle of the key.
+            query = "CREATE TABLE foo (a_array varchar[] not null, a_string varchar not null, col1 decimal, col2 decimal CONSTRAINT pk PRIMARY KEY (a_array, a_string))";
+            statement = conn.prepareStatement(query);
+            statement.execute();
+            fail();
+        } catch (SQLException e) {
+            assertEquals(SQLExceptionCode.VARBINARY_IN_ROW_KEY.getErrorCode(), e.getErrorCode());
         } finally {
             conn.close();
         }
@@ -432,8 +456,8 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         List<Object> binds = Collections.emptyList();
         for (String query : queries) {
             Scan scan = compileQuery(query, binds);
-            assertTrue(query, scan.getAttribute(GroupedAggregateRegionObserver.KEY_ORDERED_GROUP_BY_EXPRESSIONS) != null);
-            assertTrue(query, scan.getAttribute(GroupedAggregateRegionObserver.UNORDERED_GROUP_BY_EXPRESSIONS) == null);
+            assertTrue(query, scan.getAttribute(BaseScannerRegionObserver.KEY_ORDERED_GROUP_BY_EXPRESSIONS) != null);
+            assertTrue(query, scan.getAttribute(BaseScannerRegionObserver.UNORDERED_GROUP_BY_EXPRESSIONS) == null);
         }
     }
 
@@ -615,8 +639,8 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         List<Object> binds = Collections.emptyList();
         for (String query : queries) {
             Scan scan = compileQuery(query, binds);
-            assertTrue(query, scan.getAttribute(GroupedAggregateRegionObserver.KEY_ORDERED_GROUP_BY_EXPRESSIONS) == null);
-            assertTrue(query, scan.getAttribute(GroupedAggregateRegionObserver.UNORDERED_GROUP_BY_EXPRESSIONS) != null);
+            assertTrue(query, scan.getAttribute(BaseScannerRegionObserver.KEY_ORDERED_GROUP_BY_EXPRESSIONS) == null);
+            assertTrue(query, scan.getAttribute(BaseScannerRegionObserver.UNORDERED_GROUP_BY_EXPRESSIONS) != null);
         }
     }
     
@@ -653,7 +677,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             for (int i = 0; i < queries.length; i++) {
                 query = queries[i];
                 Scan scan = compileQuery(query, binds);
-                ServerAggregators aggregators = ServerAggregators.deserialize(scan.getAttribute(GroupedAggregateRegionObserver.AGGREGATORS), null);
+                ServerAggregators aggregators = ServerAggregators.deserialize(scan.getAttribute(BaseScannerRegionObserver.AGGREGATORS), null);
                 Aggregator aggregator = aggregators.getAggregators()[0];
                 assertTrue(aggregator instanceof CountAggregator);
             }
@@ -955,14 +979,14 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
     
     @Test
     public void testCastingIntegerToDecimalInSelect() throws Exception {
-        String query = "SELECT CAST a_integer AS DECIMAL/2 FROM aTable WHERE 5=a_integer";
+        String query = "SELECT CAST (a_integer AS DECIMAL)/2 FROM aTable WHERE 5=a_integer";
         List<Object> binds = Collections.emptyList();
         compileQuery(query, binds);
     }
     
     @Test
     public void testCastingStringToDecimalInSelect() throws Exception {
-        String query = "SELECT CAST b_string AS DECIMAL/2 FROM aTable WHERE 5=a_integer";
+        String query = "SELECT CAST (b_string AS DECIMAL)/2 FROM aTable WHERE 5=a_integer";
         List<Object> binds = Collections.emptyList();
         try {
             compileQuery(query, binds);
@@ -974,7 +998,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
     
     @Test
     public void testCastingStringToDecimalInWhere() throws Exception {
-        String query = "SELECT a_integer FROM aTable WHERE 2.5=CAST b_string AS DECIMAL/2 ";
+        String query = "SELECT a_integer FROM aTable WHERE 2.5=CAST (b_string AS DECIMAL)/2 ";
         List<Object> binds = Collections.emptyList();
         try {
             compileQuery(query, binds);
@@ -983,7 +1007,28 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             assertTrue(e.getErrorCode() == SQLExceptionCode.TYPE_MISMATCH.getErrorCode());
         }  
     }
-    
+
+    @Test
+    public void testCastingWithLengthInSelect() throws Exception {
+        String query = "SELECT CAST (b_string AS VARCHAR(10)) FROM aTable";
+        List<Object> binds = Collections.emptyList();
+        compileQuery(query, binds);
+    }
+
+    @Test
+    public void testCastingWithLengthInWhere() throws Exception {
+        String query = "SELECT b_string FROM aTable WHERE CAST (b_string AS VARCHAR(10)) = 'b'";
+        List<Object> binds = Collections.emptyList();
+        compileQuery(query, binds);
+    }
+
+    @Test
+    public void testCastingWithLengthAndScaleInSelect() throws Exception {
+        String query = "SELECT CAST (x_decimal AS DECIMAL(10,5)) FROM aTable";
+        List<Object> binds = Collections.emptyList();
+        compileQuery(query, binds);
+    }
+
     @Test
     public void testUsingNonComparableDataTypesInRowValueConstructorFails() throws Exception {
         String query = "SELECT a_integer, x_integer FROM aTable WHERE (a_integer, x_integer) > (2, 'abc')";
@@ -1210,33 +1255,6 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
     }
     
     @Test
-    public void testInvalidArrayTypeAsPK () throws Exception {
-        Connection conn = DriverManager.getConnection(getUrl());
-        try {
-            String query = "CREATE TABLE foo (col1 INTEGER[10] NOT NULL PRIMARY KEY)";
-            PreparedStatement statement = conn.prepareStatement(query);
-            statement.execute();
-            fail();
-        } catch (SQLException e) {
-                assertEquals(SQLExceptionCode.ARRAY_NOT_ALLOWED_IN_PRIMARY_KEY.getErrorCode(), e.getErrorCode());
-        } finally {
-                conn.close();
-        }
-
-        conn = DriverManager.getConnection(getUrl());
-        try {
-            String query = "CREATE TABLE foo (col1 VARCHAR, col2 INTEGER ARRAY[10] CONSTRAINT pk PRIMARY KEY (col1, col2))";
-            PreparedStatement statement = conn.prepareStatement(query);
-            statement.execute();
-            fail();
-        } catch (SQLException e) {
-            assertEquals(SQLExceptionCode.ARRAY_NOT_ALLOWED_IN_PRIMARY_KEY.getErrorCode(), e.getErrorCode());
-        } finally {
-            conn.close();
-        }
-    }
-
-    @Test
     public void testInvalidArraySize() throws Exception {
         Connection conn = DriverManager.getConnection(getUrl());
         try {
@@ -1249,25 +1267,6 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         } finally {
                 conn.close();
         }
-    }
-
-    @Test
-    public void testInvalidArrayInQuery () throws Exception {
-        Connection conn = DriverManager.getConnection(getUrl());
-        conn.createStatement().execute("CREATE TABLE t (k VARCHAR PRIMARY KEY, a INTEGER[10], B INTEGER[10])");
-        try {
-            conn.createStatement().execute("SELECT * FROM t ORDER BY a");
-            fail();
-        } catch (SQLException e) {
-            assertEquals(SQLExceptionCode.ORDER_BY_ARRAY_NOT_SUPPORTED.getErrorCode(), e.getErrorCode());
-        }
-        try {
-            conn.createStatement().execute("SELECT * FROM t WHERE a < b");
-            fail();
-        } catch (SQLException e) {
-            assertEquals(SQLExceptionCode.NON_EQUALITY_ARRAY_COMPARISON.getErrorCode(), e.getErrorCode());
-        }
-        conn.close();
     }
 
     @Test
@@ -1356,5 +1355,79 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         }
         conn.close();
     }
+    
+    @Test
+    public void testInvalidPrimaryKeyDecl() throws Exception {
+        String[] queries = {
+                "CREATE TABLE t (k varchar null primary key)",
+                "CREATE TABLE t (k varchar null, constraint pk primary key (k))",
+        };
+        Connection conn = DriverManager.getConnection(getUrl());
+        for (String query : queries) {
+            try {
+                conn.createStatement().execute(query);
+                fail("Compilation should have failed since this is an invalid PRIMARY KEY declaration: " + query);
+            } catch (SQLException e) {
+                assertEquals(query, SQLExceptionCode.SINGLE_PK_MAY_NOT_BE_NULL.getErrorCode(), e.getErrorCode());
+            }
+        }
+    }
+    
+    @Test
+    public void testInvalidNullCompositePrimaryKey() throws Exception {
+        Connection conn = DriverManager.getConnection(getUrl());
+        conn.createStatement().execute("CREATE TABLE t (k1 varchar, k2 varchar, constraint pk primary key(k1,k2))");
+        PreparedStatement stmt = conn.prepareStatement("UPSERT INTO t values(?,?)");
+        stmt.setString(1, "");
+        stmt.setString(2, "");
+        try {
+            stmt.execute();
+            fail();
+        } catch (ConstraintViolationException e) {
+            assertTrue(e.getMessage().contains("Primary key may not be null"));
+        }
+    }
 
+    
+    @Test
+    public void testGroupByLimitOptimization() throws Exception {
+        Connection conn = DriverManager.getConnection(getUrl());
+        conn.createStatement().execute("CREATE TABLE t (k1 varchar, k2 varchar, v varchar, constraint pk primary key(k1,k2))");
+        ResultSet rs;
+        String[] queries = {
+                "SELECT DISTINCT v FROM T LIMIT 3",
+                "SELECT v FROM T GROUP BY v,k1 LIMIT 3",
+                "SELECT count(*) FROM T GROUP BY k1 LIMIT 3",
+                "SELECT max(v) FROM T GROUP BY k1,k2 LIMIT 3",
+                "SELECT k1,k2 FROM T GROUP BY k1,k2 LIMIT 3",
+                "SELECT max(v) FROM T GROUP BY k2,k1 HAVING k1 > 'a' LIMIT 3", // Having optimized out, order of GROUP BY key not important
+                };
+        String query;
+        for (int i = 0; i < queries.length; i++) {
+            query = queries[i];
+            rs = conn.createStatement().executeQuery("EXPLAIN " + query);
+            assertTrue("Expected to find GROUP BY limit optimization in: " + query, QueryUtil.getExplainPlan(rs).contains(" LIMIT 3 GROUPS"));
+        }
+    }
+    
+    @Test
+    public void testNoGroupByLimitOptimization() throws Exception {
+        Connection conn = DriverManager.getConnection(getUrl());
+        conn.createStatement().execute("CREATE TABLE t (k1 varchar, k2 varchar, v varchar, constraint pk primary key(k1,k2))");
+        ResultSet rs;
+        String[] queries = {
+                "SELECT DISTINCT v FROM T ORDER BY v LIMIT 3",
+                "SELECT v FROM T GROUP BY v,k1 ORDER BY v LIMIT 3",
+                "SELECT DISTINCT count(*) FROM T GROUP BY k1 LIMIT 3",
+                "SELECT count(1) FROM T GROUP BY v,k1 LIMIT 3",
+                "SELECT max(v) FROM T GROUP BY k1,k2 HAVING count(k1) > 1 LIMIT 3",
+                "SELECT count(v) FROM T GROUP BY to_date(k2),k1 LIMIT 3",
+                };
+        String query;
+        for (int i = 0; i < queries.length; i++) {
+            query = queries[i];
+            rs = conn.createStatement().executeQuery("EXPLAIN " + query);
+            assertFalse("Did not expected to find GROUP BY limit optimization in: " + query, QueryUtil.getExplainPlan(rs).contains(" LIMIT 3 GROUPS"));
+        }
+    }
 }

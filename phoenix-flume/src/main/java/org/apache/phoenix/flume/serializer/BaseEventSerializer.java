@@ -27,6 +27,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -42,6 +43,7 @@ import org.apache.phoenix.flume.SchemaHandler;
 import org.apache.phoenix.util.ColumnInfo;
 import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.SchemaUtil;
+import org.apache.phoenix.util.StringUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -151,7 +153,7 @@ public abstract class BaseEventSerializer implements EventSerializer {
             String  cq = null;
             String  cf = null;
             Integer dt = null;
-            rs = connection.getMetaData().getColumns(null, schemaName, tableName, null);
+            rs = connection.getMetaData().getColumns("", StringUtil.escapeLike(SchemaUtil.normalizeIdentifier(schemaName)), StringUtil.escapeLike(SchemaUtil.normalizeIdentifier(tableName)), null);
             while (rs.next()) {
                 cf = rs.getString(QueryUtil.COLUMN_FAMILY_POSITION);
                 cq = rs.getString(QueryUtil.COLUMN_NAME_POSITION);
@@ -189,7 +191,7 @@ public abstract class BaseEventSerializer implements EventSerializer {
                 position++;
             }
             
-            this.upsertStatement = QueryUtil.constructUpsertStatement(columnMetadata, fullTableName, columnMetadata.length);
+            this.upsertStatement = QueryUtil.constructUpsertStatement(fullTableName, Arrays.asList(columnMetadata));
             logger.info(" the upsert statement is {} " ,this.upsertStatement);
             
         }  catch (SQLException e) {

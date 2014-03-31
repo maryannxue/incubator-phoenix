@@ -110,13 +110,6 @@ public class AggregateResultScannerTest extends BaseConnectionlessQueryTest {
             }
             
             @Override
-            public void readFields(DataInput arg0) throws IOException {
-            }
-            @Override
-            public void write(DataOutput arg0) throws IOException {
-            }
-            
-            @Override
             public Integer getArraySize() {
                 return 0;
             }
@@ -124,6 +117,11 @@ public class AggregateResultScannerTest extends BaseConnectionlessQueryTest {
             @Override
             public byte[] getViewConstant() {
                 return null;
+            }
+            
+            @Override
+            public boolean isViewReferenced() {
+                return false;
             }
         })), null);
         aggregationManager.setAggregators(new ClientAggregators(Collections.<SingleAggregateFunction>singletonList(func), 1));

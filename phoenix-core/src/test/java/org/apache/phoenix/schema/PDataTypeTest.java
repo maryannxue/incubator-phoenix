@@ -28,6 +28,7 @@ import java.math.BigInteger;
 import java.sql.Date;
 import java.sql.Time;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -35,9 +36,8 @@ import java.util.List;
 
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.junit.Test;
-
 import org.apache.phoenix.util.TestUtil;
+import org.junit.Test;
 
 
 public class PDataTypeTest {
@@ -1219,7 +1219,6 @@ public class PDataTypeTest {
 
         // Testing coercing long to other values.
         assertTrue(PDataType.LONG.isCoercibleTo(PDataType.DOUBLE));
-        assertTrue(PDataType.LONG.isCoercibleTo(PDataType.FLOAT));
         assertFalse(PDataType.LONG.isCoercibleTo(PDataType.INTEGER));
         assertFalse(PDataType.LONG.isCoercibleTo(PDataType.INTEGER, Long.MAX_VALUE));
         assertFalse(PDataType.LONG.isCoercibleTo(PDataType.INTEGER, Integer.MAX_VALUE + 10L));
@@ -1378,7 +1377,6 @@ public class PDataTypeTest {
 
         // Testing coercing unsigned_long to other values.
         assertTrue(PDataType.UNSIGNED_LONG.isCoercibleTo(PDataType.DOUBLE));
-        assertTrue(PDataType.UNSIGNED_LONG.isCoercibleTo(PDataType.FLOAT));
         assertFalse(PDataType.UNSIGNED_LONG.isCoercibleTo(PDataType.INTEGER));
         assertTrue(PDataType.UNSIGNED_LONG.isCoercibleTo(PDataType.INTEGER, 10L));
         assertTrue(PDataType.UNSIGNED_LONG.isCoercibleTo(PDataType.INTEGER, 0L));
@@ -1399,7 +1397,6 @@ public class PDataTypeTest {
         assertTrue(PDataType.UNSIGNED_LONG.isCoercibleTo(PDataType.UNSIGNED_TINYINT, 0L));
         assertFalse(PDataType.UNSIGNED_LONG.isCoercibleTo(PDataType.UNSIGNED_TINYINT, 1000L));
         assertTrue(PDataType.UNSIGNED_LONG.isCoercibleTo(PDataType.UNSIGNED_DOUBLE));
-        assertTrue(PDataType.UNSIGNED_LONG.isCoercibleTo(PDataType.UNSIGNED_FLOAT));
         
         // Testing coercing unsigned_smallint to other values.
         assertTrue(PDataType.UNSIGNED_SMALLINT.isCoercibleTo(PDataType.DOUBLE));
@@ -1509,6 +1506,12 @@ public class PDataTypeTest {
             testReadDecimalPrecisionAndScaleFromRawBytes(bds[i]);
             testReadDecimalPrecisionAndScaleFromRawBytes(bds[i].negate());
         }
+        
+        assertTrue(new BigDecimal("5").remainder(BigDecimal.ONE).equals(BigDecimal.ZERO));
+        assertTrue(new BigDecimal("5.0").remainder(BigDecimal.ONE).compareTo(BigDecimal.ZERO)==0);
+        assertTrue(new BigDecimal("5.00").remainder(BigDecimal.ONE).compareTo(BigDecimal.ZERO)==0);
+        assertFalse(new BigDecimal("5.01").remainder(BigDecimal.ONE).equals(BigDecimal.ZERO));
+        assertFalse(new BigDecimal("-5.1").remainder(BigDecimal.ONE).equals(BigDecimal.ZERO));
     }
     
     @Test
@@ -1556,7 +1559,32 @@ public class PDataTypeTest {
             
         }
     }
-    
+
+    @Test
+    public void testGetResultSetSqlType() {
+        assertEquals(Types.INTEGER, PDataType.INTEGER.getResultSetSqlType());
+        assertEquals(Types.INTEGER, PDataType.UNSIGNED_INT.getResultSetSqlType());
+        assertEquals(Types.BIGINT, PDataType.LONG.getResultSetSqlType());
+        assertEquals(Types.BIGINT, PDataType.UNSIGNED_LONG.getResultSetSqlType());
+        assertEquals(Types.SMALLINT, PDataType.SMALLINT.getResultSetSqlType());
+        assertEquals(Types.SMALLINT, PDataType.UNSIGNED_SMALLINT.getResultSetSqlType());
+        assertEquals(Types.TINYINT, PDataType.TINYINT.getResultSetSqlType());
+        assertEquals(Types.TINYINT, PDataType.UNSIGNED_TINYINT.getResultSetSqlType());
+        assertEquals(Types.FLOAT, PDataType.FLOAT.getResultSetSqlType());
+        assertEquals(Types.FLOAT, PDataType.UNSIGNED_FLOAT.getResultSetSqlType());
+        assertEquals(Types.DOUBLE, PDataType.DOUBLE.getResultSetSqlType());
+        assertEquals(Types.DOUBLE, PDataType.UNSIGNED_DOUBLE.getResultSetSqlType());
+
+        // Check that all array types are defined as java.sql.Types.ARRAY
+        for (PDataType dataType : PDataType.values()) {
+            if (dataType.isArrayType()) {
+                assertEquals("Wrong datatype for " + dataType,
+                        Types.ARRAY,
+                        dataType.getResultSetSqlType());
+            }
+        }
+    }
+
     private void testReadDecimalPrecisionAndScaleFromRawBytes(BigDecimal bd) {
         byte[] b = PDataType.DECIMAL.toBytes(bd);
         int[] v = PDataType.getDecimalPrecisionAndScale(b, 0, b.length);

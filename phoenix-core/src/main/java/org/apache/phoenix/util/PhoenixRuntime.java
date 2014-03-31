@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Properties;
 import java.util.StringTokenizer;
 
+import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
@@ -104,27 +105,29 @@ public class PhoenixRuntime {
     private static final String HEADER_OPTION = "-h";
     private static final String STRICT_OPTION = "-s";
     private static final String CSV_OPTION = "-d";
+    private static final String ARRAY_ELEMENT_SEP_OPTION = "-a";
     private static final String HEADER_IN_LINE = "in-line";
     private static final String SQL_FILE_EXT = ".sql";
     private static final String CSV_FILE_EXT = ".csv";
-    
+
     private static void usageError() {
         System.err.println("Usage: psql [-t table-name] [-h comma-separated-column-names | in-line] [-d field-delimiter-char quote-char escape-char]<zookeeper>  <path-to-sql-or-csv-file>...\n" +
-                "  By default, the name of the CSV file is used to determine the Phoenix table into which the CSV data is loaded\n" +
+                "  By default, the name of the CSV file (case insensitive) is used to determine the Phoenix table into which the CSV data is loaded\n" +
                 "  and the ordinal value of the columns determines the mapping.\n" +
-                "  -t overrides the table into which the CSV data is loaded\n" +
-                "  -h overrides the column names to which the CSV data maps\n" +
+                "  -t overrides the table into which the CSV data is loaded and is case sensitive.\n" +
+                "  -h overrides the column names to which the CSV data maps and is case sensitive.\n" +
                 "     A special value of in-line indicating that the first line of the CSV file\n" +
                 "     determines the column to which the data maps.\n" +
                 "  -s uses strict mode by throwing an exception if a column name doesn't match during CSV loading.\n" +
                 "  -d uses custom delimiters for CSV loader, need to specify single char for field delimiter, phrase delimiter, and escape char.\n" +
                 "     number is NOT usually a delimiter and shall be taken as 1 -> ctrl A, 2 -> ctrl B ... 9 -> ctrl I. \n" +
+                "  -a define the array element separator, defaults to ':'\n" +
                 "Examples:\n" +
                 "  psql localhost my_ddl.sql\n" +
                 "  psql localhost my_ddl.sql my_table.csv\n" +
-                "  psql -t my_table my_cluster:1825 my_table2012-Q3.csv\n" +
-                "  psql -t my_table -h col1,col2,col3 my_cluster:1825 my_table2012-Q3.csv\n" +
-                "  psql -t my_table -h col1,col2,col3 -d 1 2 3 my_cluster:1825 my_table2012-Q3.csv\n"
+                "  psql -t MY_TABLE my_cluster:1825 my_table2012-Q3.csv\n" +
+                "  psql -t MY_TABLE -h COL1,COL2,COL3 my_cluster:1825 my_table2012-Q3.csv\n" +
+                "  psql -t MY_TABLE -h COL1,COL2,COL3 -d 1 2 3 my_cluster:1825 my_table2012-Q3.csv\n"
         );
         System.exit(-1);
     }
@@ -145,7 +148,8 @@ public class PhoenixRuntime {
             String tableName = null;
             List<String> columns = null;
             boolean isStrict = false;
-            List<String> delimiter = new ArrayList<String>();
+            String arrayElementSeparator = CSVCommonsLoader.DEFAULT_ARRAY_ELEMENT_SEPARATOR;
+            List<String> customMetaCharacters = new ArrayList<String>();
 
             int i = 0;
             for (; i < args.length; i++) {
@@ -173,11 +177,13 @@ public class PhoenixRuntime {
                 } else if (CSV_OPTION.equals(args[i])) {
                     for(int j=0; j < 3; j++) {
                         if(args[++i].length()==1){
-                            delimiter.add(args[i]);
+                            customMetaCharacters.add(args[i]);
                         } else {
                             usageError();
                         }
                     }
+                } else if (ARRAY_ELEMENT_SEP_OPTION.equals(args[i])) {
+                    arrayElementSeparator = args[++i];
                 } else {
                     break;
                 }
@@ -196,9 +202,10 @@ public class PhoenixRuntime {
                		PhoenixRuntime.executeStatements(conn, new FileReader(args[i]), Collections.emptyList());
                 } else if (fileName.endsWith(CSV_FILE_EXT)) {
                     if (tableName == null) {
-                        tableName = fileName.substring(fileName.lastIndexOf(File.separatorChar) + 1, fileName.length()-CSV_FILE_EXT.length());
+                        tableName = SchemaUtil.normalizeIdentifier(fileName.substring(fileName.lastIndexOf(File.separatorChar) + 1, fileName.length()-CSV_FILE_EXT.length()));
                     }
-                    CSVLoader csvLoader = new CSVLoader(conn, tableName, columns, isStrict, delimiter);
+                    CSVCommonsLoader csvLoader = 
+                    		new CSVCommonsLoader(conn, tableName, columns, isStrict, customMetaCharacters, arrayElementSeparator);
                     csvLoader.upsert(fileName);
                 } else {
                     usageError();
@@ -286,7 +293,8 @@ public class PhoenixRuntime {
      * @throws SQLException 
      */
     public static Iterator<Pair<byte[],List<KeyValue>>> getUncommittedDataIterator(Connection conn, boolean includeMutableIndexes) throws SQLException {
-        final Iterator<Pair<byte[],List<Mutation>>> iterator = conn.unwrap(PhoenixConnection.class).getMutationState().toMutations(includeMutableIndexes);
+        final PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+        final Iterator<Pair<byte[],List<Mutation>>> iterator = pconn.getMutationState().toMutations(includeMutableIndexes);
         return new Iterator<Pair<byte[],List<KeyValue>>>() {
 
             @Override
@@ -299,13 +307,13 @@ public class PhoenixRuntime {
                 Pair<byte[],List<Mutation>> pair = iterator.next();
                 List<KeyValue> keyValues = Lists.newArrayListWithExpectedSize(pair.getSecond().size() * 5); // Guess-timate 5 key values per row
                 for (Mutation mutation : pair.getSecond()) {
-                    for (List<KeyValue> keyValueList : mutation.getFamilyMap().values()) {
-                        for (KeyValue keyValue : keyValueList) {
-                            keyValues.add(keyValue);
+                    for (List<Cell> keyValueList : mutation.getFamilyCellMap().values()) {
+                        for (Cell keyValue : keyValueList) {
+                            keyValues.add(org.apache.hadoop.hbase.KeyValueUtil.ensureKeyValue(keyValue));
                         }
                     }
                 }
-                Collections.sort(keyValues, KeyValue.COMPARATOR);
+                Collections.sort(keyValues, pconn.getKeyValueBuilder().getKeyValueComparator());
                 return new Pair<byte[], List<KeyValue>>(pair.getFirst(),keyValues);
             }
 

@@ -28,10 +28,8 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.filter.Filter.ReturnCode;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.junit.Test;
-
-import org.apache.phoenix.hbase.index.covered.filter.ApplyAndFilterDeletesFilter;
 import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
+import org.junit.Test;
 
 /**
  * Test filter to ensure that it correctly handles KVs of different types correctly
@@ -91,6 +89,7 @@ public class TestApplyAndFilterDeletesFilter {
     byte[] laterFamily = Bytes.toBytes("zfamily");
     filter = new ApplyAndFilterDeletesFilter(asSet(laterFamily));
     assertEquals(ReturnCode.SKIP, filter.filterKeyValue(kv));
+    @SuppressWarnings("deprecation")
     KeyValue expected = KeyValue.createFirstOnRow(kv.getRow(), laterFamily, new byte[0]);
     assertEquals("Didn't get a hint from a family delete", ReturnCode.SEEK_NEXT_USING_HINT,
       filter.filterKeyValue(next));
@@ -128,8 +127,7 @@ public class TestApplyAndFilterDeletesFilter {
   }
 
   private KeyValue createKvForType(Type t, long timestamp) {
-    return new KeyValue(row, family, qualifier, 0, qualifier.length, timestamp, t, value, 0,
-        value.length);
+    return new KeyValue(row, family, qualifier, timestamp, t, value);
   }
 
   /**
@@ -181,9 +179,7 @@ public class TestApplyAndFilterDeletesFilter {
     ApplyAndFilterDeletesFilter filter = new ApplyAndFilterDeletesFilter(EMPTY_SET);
     KeyValue d = createKvForType(Type.DeleteColumn, 12);
     byte[] qual2 = Bytes.add(qualifier, Bytes.toBytes("-other"));
-    KeyValue put =
-        new KeyValue(row, family, qual2, 0, qual2.length, 11, Type.Put, value, 0,
-            value.length);
+    KeyValue put = new KeyValue(row, family, qual2, 11, Type.Put, value);
 
     assertEquals("Didn't filter out delete column", ReturnCode.SKIP, filter.filterKeyValue(d));
     // different column put should still be visible

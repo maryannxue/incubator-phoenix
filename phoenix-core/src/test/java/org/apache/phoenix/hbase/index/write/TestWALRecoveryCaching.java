@@ -48,19 +48,13 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
+import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
-import org.junit.Assert;
-import org.junit.Ignore;
-import org.junit.Rule;
-import org.junit.Test;
-
-import com.google.common.collect.Multimap;
-
 import org.apache.phoenix.hbase.index.IndexTestingUtils;
 import org.apache.phoenix.hbase.index.Indexer;
 import org.apache.phoenix.hbase.index.TableName;
@@ -72,6 +66,12 @@ import org.apache.phoenix.hbase.index.table.HTableInterfaceReference;
 import org.apache.phoenix.hbase.index.util.IndexManagementUtil;
 import org.apache.phoenix.hbase.index.write.recovery.PerRegionIndexWriteCache;
 import org.apache.phoenix.hbase.index.write.recovery.StoreFailuresInCachePolicy;
+import org.junit.Assert;
+import org.junit.Ignore;
+import org.junit.Rule;
+import org.junit.Test;
+
+import com.google.common.collect.Multimap;
 
 /**
  * When a regionserver crashes, its WAL is split and then replayed to the server. If the index
@@ -139,7 +139,8 @@ public class TestWALRecoveryCaching {
   }
 
   //TODO: Jesse to fix
-  @Ignore("Configuration issue - valid test, just needs fixing")
+  @SuppressWarnings("deprecation")
+@Ignore("Configuration issue - valid test, just needs fixing")
   @Test
   public void testWaitsOnIndexRegionToReload() throws Exception {
     HBaseTestingUtility util = new HBaseTestingUtility();
@@ -212,7 +213,7 @@ public class TestWALRecoveryCaching {
         LOG.info("\t== Offline: " + server.getServerName());
         continue;
       }
-      List<HRegionInfo> regions = server.getOnlineRegions();
+      List<HRegionInfo> regions = ProtobufUtil.getOnlineRegions(server);
       LOG.info("\t" + server.getServerName() + " regions: " + regions);
     }
 
@@ -269,7 +270,7 @@ public class TestWALRecoveryCaching {
     for (RegionServerThread rst : cluster.getRegionServerThreads()) {
       // if its the server we are going to kill, get the regions we want to reassign
       if (rst.getRegionServer().getServerName().equals(server)) {
-        online = rst.getRegionServer().getOnlineRegions(table);
+        online = rst.getRegionServer().getOnlineRegions(org.apache.hadoop.hbase.TableName.valueOf(table));
         break;
       }
     }
@@ -309,7 +310,7 @@ public class TestWALRecoveryCaching {
 
         // force reassign the regions from the table
         for (HRegion region : online) {
-          cluster.getMaster().assign(region.getRegionName());
+          cluster.getMaster().assignRegion(region.getRegionInfo());
         }
 
         LOG.info("Starting region server:" + server.getHostname());
