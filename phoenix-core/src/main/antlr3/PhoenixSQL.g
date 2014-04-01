@@ -642,16 +642,16 @@ single_table_ref returns [TableNode ret]
     |   LPAREN SELECT s=hinted_select_node RPAREN ((AS)? alias=identifier)? { $ret = factory.derivedTable(alias, s); }
     ;
 
-join_parts returns [List<Pair<Pair<JoinTableNode.JoinType, ParseNode>,TableNode>> ret]
-@init{ret = new ArrayList<Pair<Pair<JoinTableNode.JoinType, ParseNode>,TableNode>>(4); }
+join_parts returns [List<JoinPartNode> ret]
+@init{ret = new ArrayList<JoinPartNode>(4); }
 	:	(p=join_part { $ret.add(p); })*
 	;
 
-join_part returns [Pair<Pair<JoinTableNode.JoinType, ParseNode>,TableNode> ret]
-	:	j=join_type JOIN r=single_table_ref ON e=expression { $ret = Pair.newPair(Pair.newPair(j, e), r); }
-	|	j=join_type JOIN LPAREN r=table_ref RPAREN ON e=expression { $ret = Pair.newPair(Pair.newPair(j, e), r); }
+join_part returns [JoinPartNode ret]
+	:	j=join_type JOIN r=single_table_ref ON e=expression { $ret = factory.joinPart(j, e, r); }
+	|	j=join_type JOIN LPAREN r=table_ref RPAREN ON e=expression { $ret = factory.joinPart(j, e, r); }
 	;
-	
+
 join_type returns [JoinTableNode.JoinType ret]
     :   INNER?   { $ret = JoinTableNode.JoinType.Inner; }
     |   LEFT OUTER?   { $ret = JoinTableNode.JoinType.Left; }
