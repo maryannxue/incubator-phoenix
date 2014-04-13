@@ -115,6 +115,10 @@ public class HashJoinInfo {
         return postJoinFilterExpression;
     }
     
+    /*
+     * If the LHS table is a sub-select, we always do projection, since
+     * the ON expressions reference only projected columns.
+     */
     public boolean forceProjection() {
         return forceProjection;
     }
