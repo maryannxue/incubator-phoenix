@@ -292,6 +292,8 @@ public class QueryCompiler {
         ColumnResolver resolver = context.getResolver();
         TableRef tableRef = context.getCurrentTable();
         PTable table = tableRef.getTable();
+        
+        // TODO PHOENIX-944. See DerivedTableIT for a list of unsupported cases.
         if (table.getType() == PTableType.SUBQUERY)
             throw new SQLFeatureNotSupportedException("Complex nested queries not supported.");
         

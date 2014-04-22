@@ -50,7 +50,9 @@ public class SubselectRewriter extends ParseNodeRewriter {
         if (postFilters.isEmpty())
             return statement;
         
-        // TODO handle this from caller
+        // TODO Handle post-filters in the below two cases from JoinCompiler:
+        // 1) select ... from A join (select id, b from T limit 10) as B on A.id = B.id where B.b = 'b'
+        // 2) select ... from A join (select count(*) c from T) as B on A.a = B.c where B.c > 10
         if (statement.getLimit() != null || (statement.isAggregate() && statement.getGroupBy().isEmpty()))
             throw new SQLFeatureNotSupportedException();
         

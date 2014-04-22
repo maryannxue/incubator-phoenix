@@ -42,103 +42,139 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLFeatureNotSupportedException;
+import java.util.Collection;
+import java.util.List;
 import java.util.Properties;
 
 import org.apache.phoenix.util.PhoenixRuntime;
+import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameters;
 
+import com.google.common.collect.Lists;
+
+@RunWith(Parameterized.class)
 public class DerivedTableIT extends BaseClientManagedTimeIT {
+    private static final String tenantId = getOrganizationId();
     private static final String MSG = "Complex nested queries not supported.";
+    
+    private long ts;
+    private String indexDDL;
+    
+    public DerivedTableIT(String indexDDL) {
+        this.indexDDL = indexDDL;
+    }
+    
+    @Before
+    public void initTable() throws Exception {
+         ts = nextTimestamp();
+        initATableValues(tenantId, getDefaultSplits(tenantId), null, ts);
+        if (indexDDL != null && indexDDL.length() > 0) {
+            Properties props = new Properties(TEST_PROPERTIES);
+            props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts));
+            Connection conn = DriverManager.getConnection(getUrl(), props);
+            conn.createStatement().execute(indexDDL);
+        }
+    }
+    
+    @Parameters(name="{0}")
+    public static Collection<Object> data() {
+        List<Object> testCases = Lists.newArrayList();
+        testCases.add(new String[] { "CREATE INDEX ATABLE_DERIVED_IDX ON aTable (a_byte) INCLUDE ("
+                + "    A_STRING, " + "    B_STRING)" });
+        testCases.add(new String[] { "" });
+        return testCases;
+    }
 
     @Test
     public void testDerivedTableWithWhere() throws Exception {
         long ts = nextTimestamp();
-        String tenantId = getOrganizationId();
-        initATableValues(tenantId, getDefaultSplits(tenantId), null, ts);
         Properties props = new Properties(TEST_PROPERTIES);
-        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 2));
+        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 1));
         Connection conn = DriverManager.getConnection(getUrl(), props);
         try {
             // (where)
-            String query = "SELECT t.eid, t.x + 9 FROM (SELECT entity_id eid, b_string b, a_short + 1 x FROM aTable WHERE entity_id < '" + ROW8 + "') AS t";
+            String query = "SELECT t.eid, t.x + 9 FROM (SELECT entity_id eid, b_string b, a_byte + 1 x FROM aTable WHERE a_byte + 1 < 9) AS t";
             PreparedStatement statement = conn.prepareStatement(query);
             ResultSet rs = statement.executeQuery();
             assertTrue (rs.next());
             assertEquals(ROW1,rs.getString(1));
-            assertEquals(138,rs.getShort(2));
+            assertEquals(11,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW2,rs.getString(1));
-            assertEquals(139,rs.getShort(2));
+            assertEquals(12,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW3,rs.getString(1));
-            assertEquals(140,rs.getShort(2));
+            assertEquals(13,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW4,rs.getString(1));
-            assertEquals(141,rs.getShort(2));
+            assertEquals(14,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW5,rs.getString(1));
-            assertEquals(142,rs.getShort(2));
+            assertEquals(15,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW6,rs.getString(1));
-            assertEquals(143,rs.getShort(2));
+            assertEquals(16,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW7,rs.getString(1));
-            assertEquals(144,rs.getShort(2));
+            assertEquals(17,rs.getInt(2));
 
             assertFalse(rs.next());
             
             // () where
-            query = "SELECT t.eid, t.x + 9 FROM (SELECT entity_id eid, b_string b, a_short + 1 x FROM aTable) AS t WHERE t.b = '" + C_VALUE + "'";
+            query = "SELECT t.eid, t.x + 9 FROM (SELECT entity_id eid, b_string b, a_byte + 1 x FROM aTable) AS t WHERE t.b = '" + C_VALUE + "'";
             statement = conn.prepareStatement(query);
             rs = statement.executeQuery();
             assertTrue (rs.next());
             assertEquals(ROW2,rs.getString(1));
-            assertEquals(139,rs.getShort(2));
+            assertEquals(12,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW5,rs.getString(1));
-            assertEquals(142,rs.getShort(2));
+            assertEquals(15,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW8,rs.getString(1));
-            assertEquals(145,rs.getShort(2));
+            assertEquals(18,rs.getInt(2));
 
             assertFalse(rs.next());
             
             // (where) where
-            query = "SELECT t.eid, t.x + 9 FROM (SELECT entity_id eid, b_string b, a_short + 1 x FROM aTable WHERE entity_id < '" + ROW8 + "') AS t WHERE t.b = '" + C_VALUE + "'";
+            query = "SELECT t.eid, t.x + 9 FROM (SELECT entity_id eid, b_string b, a_byte + 1 x FROM aTable WHERE a_byte + 1 < 9) AS t WHERE t.b = '" + C_VALUE + "'";
             statement = conn.prepareStatement(query);
             rs = statement.executeQuery();
             assertTrue (rs.next());
             assertEquals(ROW2,rs.getString(1));
-            assertEquals(139,rs.getShort(2));
+            assertEquals(12,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW5,rs.getString(1));
-            assertEquals(142,rs.getShort(2));
+            assertEquals(15,rs.getInt(2));
 
             assertFalse(rs.next());
 
             // (groupby where) where
-            query = "SELECT t.a, t.c, t.m FROM (SELECT a_string a, count(*) c, max(a_short) m FROM aTable WHERE entity_id != '" + ROW8 + "' GROUP BY a_string) AS t WHERE t.c > 1";
+            query = "SELECT t.a, t.c, t.m FROM (SELECT a_string a, count(*) c, max(a_byte) m FROM aTable WHERE a_byte != 8 GROUP BY a_string) AS t WHERE t.c > 1";
             statement = conn.prepareStatement(query);
             rs = statement.executeQuery();
             assertTrue (rs.next());
             assertEquals(A_VALUE,rs.getString(1));
             assertEquals(4,rs.getInt(2));
-            assertEquals(131,rs.getShort(3));
+            assertEquals(4,rs.getInt(3));
             assertTrue (rs.next());
             assertEquals(B_VALUE,rs.getString(1));
             assertEquals(3,rs.getInt(2));
-            assertEquals(134,rs.getShort(3));
+            assertEquals(7,rs.getInt(3));
 
             assertFalse(rs.next());
             
             // (groupby having where) where
-            query = "SELECT t.a, t.c, t.m FROM (SELECT a_string a, count(*) c, max(a_short) m FROM aTable WHERE entity_id != '" + ROW8 + "' GROUP BY a_string HAVING count(*) >= 2) AS t WHERE t.a != '" + A_VALUE + "'";
+            query = "SELECT t.a, t.c, t.m FROM (SELECT a_string a, count(*) c, max(a_byte) m FROM aTable WHERE a_byte != 8 GROUP BY a_string HAVING count(*) >= 2) AS t WHERE t.a != '" + A_VALUE + "'";
             statement = conn.prepareStatement(query);
             rs = statement.executeQuery();
             assertTrue (rs.next());
             assertEquals(B_VALUE,rs.getString(1));
             assertEquals(3,rs.getInt(2));
-            assertEquals(134,rs.getShort(3));
+            assertEquals(7,rs.getInt(3));
 
             assertFalse(rs.next());
             
@@ -167,24 +203,22 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
     @Test
     public void testDerivedTableWithGroupBy() throws Exception {
         long ts = nextTimestamp();
-        String tenantId = getOrganizationId();
-        initATableValues(tenantId, getDefaultSplits(tenantId), null, ts);
         Properties props = new Properties(TEST_PROPERTIES);
-        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 2));
+        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 1));
         Connection conn = DriverManager.getConnection(getUrl(), props);
         try {
             // () groupby having
-            String query = "SELECT t.a, count(*), max(t.s) FROM (SELECT a_string a, a_short s FROM aTable WHERE entity_id != '" + ROW8 + "') AS t GROUP BY t.a HAVING count(*) > 1";
+            String query = "SELECT t.a, count(*), max(t.s) FROM (SELECT a_string a, a_byte s FROM aTable WHERE a_byte != 8) AS t GROUP BY t.a HAVING count(*) > 1";
             PreparedStatement statement = conn.prepareStatement(query);
             ResultSet rs = statement.executeQuery();
             assertTrue (rs.next());
             assertEquals(A_VALUE,rs.getString(1));
             assertEquals(4,rs.getInt(2));
-            assertEquals(131,rs.getShort(3));
+            assertEquals(4,rs.getInt(3));
             assertTrue (rs.next());
             assertEquals(B_VALUE,rs.getString(1));
             assertEquals(3,rs.getInt(2));
-            assertEquals(134,rs.getShort(3));
+            assertEquals(7,rs.getInt(3));
 
             assertFalse(rs.next());
             
@@ -204,10 +238,8 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
     @Test
     public void testDerivedTableWithOrderBy() throws Exception {
         long ts = nextTimestamp();
-        String tenantId = getOrganizationId();
-        initATableValues(tenantId, getDefaultSplits(tenantId), null, ts);
         Properties props = new Properties(TEST_PROPERTIES);
-        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 2));
+        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 1));
         Connection conn = DriverManager.getConnection(getUrl(), props);
         try {
             // (orderby)
@@ -301,10 +333,8 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
     @Test
     public void testDerivedTableWithLimit() throws Exception {
         long ts = nextTimestamp();
-        String tenantId = getOrganizationId();
-        initATableValues(tenantId, getDefaultSplits(tenantId), null, ts);
         Properties props = new Properties(TEST_PROPERTIES);
-        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 2));
+        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 1));
         Connection conn = DriverManager.getConnection(getUrl(), props);
         try {
             // (limit)
@@ -370,10 +400,8 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
     @Test
     public void testDerivedTableWithDistinct() throws Exception {
         long ts = nextTimestamp();
-        String tenantId = getOrganizationId();
-        initATableValues(tenantId, getDefaultSplits(tenantId), null, ts);
         Properties props = new Properties(TEST_PROPERTIES);
-        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 2));
+        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 1));
         Connection conn = DriverManager.getConnection(getUrl(), props);
         try {
             // (distinct)
@@ -454,14 +482,12 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
     @Test
     public void testDerivedTableWithAggregate() throws Exception {
         long ts = nextTimestamp();
-        String tenantId = getOrganizationId();
-        initATableValues(tenantId, getDefaultSplits(tenantId), null, ts);
         Properties props = new Properties(TEST_PROPERTIES);
-        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 2));
+        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 1));
         Connection conn = DriverManager.getConnection(getUrl(), props);
         try {
             // (count)
-            String query = "SELECT * FROM (SELECT count(*) FROM aTable WHERE entity_id != '" + ROW8 + "') AS t";
+            String query = "SELECT * FROM (SELECT count(*) FROM aTable WHERE a_byte != 8) AS t";
             PreparedStatement statement = conn.prepareStatement(query);
             ResultSet rs = statement.executeQuery();
             assertTrue (rs.next());
@@ -470,7 +496,7 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
             assertFalse(rs.next());
             
             // count ()
-            query = "SELECT count(*) FROM (SELECT entity_id FROM aTable) AS t WHERE t.entity_id != '" + ROW8 + "'";
+            query = "SELECT count(*) FROM (SELECT a_byte FROM aTable) AS t WHERE t.a_byte != 8";
             statement = conn.prepareStatement(query);
             rs = statement.executeQuery();
             assertTrue (rs.next());
@@ -512,16 +538,14 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
     @Test
     public void testDerivedTableWithJoin() throws Exception {
         long ts = nextTimestamp();
-        String tenantId = getOrganizationId();
-        initATableValues(tenantId, getDefaultSplits(tenantId), null, ts);
         Properties props = new Properties(TEST_PROPERTIES);
-        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 2));
+        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 1));
         Connection conn = DriverManager.getConnection(getUrl(), props);
         try {
             // groupby (join)
-            String query = "SELECT q.id1, count(q.id2) FROM (SELECT t1.entity_id id1, t2.entity_id id2" 
+            String query = "SELECT q.id1, count(q.id2) FROM (SELECT t1.entity_id id1, t2.entity_id id2, t2.a_byte b2" 
                         + " FROM aTable t1 JOIN aTable t2 ON t1.a_string = t2.b_string" 
-                        + " WHERE t1.entity_id >= '" + ROW8 + "') AS q WHERE q.id2 != '" + ROW5 + "' GROUP BY q.id1";
+                        + " WHERE t1.a_byte >= 8) AS q WHERE q.b2 != 5 GROUP BY q.id1";
             PreparedStatement statement = conn.prepareStatement(query);
             ResultSet rs = statement.executeQuery();
             assertTrue (rs.next());
@@ -534,9 +558,9 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
             assertFalse(rs.next());
             
             // distinct (join)
-            query = "SELECT DISTINCT q.id1 FROM (SELECT t1.entity_id id1, t2.entity_id id2" 
+            query = "SELECT DISTINCT q.id1 FROM (SELECT t1.entity_id id1, t2.a_byte b2" 
                         + " FROM aTable t1 JOIN aTable t2 ON t1.a_string = t2.b_string" 
-                        + " WHERE t1.entity_id >= '" + ROW8 + "') AS q WHERE q.id2 != '" + ROW5 + "'";
+                        + " WHERE t1.a_byte >= 8) AS q WHERE q.b2 != 5";
             statement = conn.prepareStatement(query);
             rs = statement.executeQuery();
             assertTrue (rs.next());
@@ -547,9 +571,9 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
             assertFalse(rs.next());
 
             // count (join)
-            query = "SELECT COUNT(*) FROM (SELECT t1.entity_id id1, t2.entity_id id2" 
+            query = "SELECT COUNT(*) FROM (SELECT t2.a_byte b2" 
                         + " FROM aTable t1 JOIN aTable t2 ON t1.a_string = t2.b_string" 
-                        + " WHERE t1.entity_id >= '" + ROW8 + "') AS q WHERE q.id2 != '" + ROW5 + "'";
+                        + " WHERE t1.a_byte >= 8) AS q WHERE q.b2 != 5";
             statement = conn.prepareStatement(query);
             rs = statement.executeQuery();
             assertTrue (rs.next());
@@ -564,48 +588,46 @@ public class DerivedTableIT extends BaseClientManagedTimeIT {
     @Test
     public void testNestedDerivedTable() throws Exception {
         long ts = nextTimestamp();
-        String tenantId = getOrganizationId();
-        initATableValues(tenantId, getDefaultSplits(tenantId), null, ts);
         Properties props = new Properties(TEST_PROPERTIES);
-        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 2));
+        props.setProperty(PhoenixRuntime.CURRENT_SCN_ATTRIB, Long.toString(ts + 1));
         Connection conn = DriverManager.getConnection(getUrl(), props);
         try {
             // select(select(select))
-            String query = "SELECT q.id, q.x10 * 10 FROM (SELECT t.eid id, t.x + 9 x10, t.astr a, t.bstr b FROM (SELECT entity_id eid, a_string astr, b_string bstr, a_short + 1 x FROM aTable WHERE entity_id < ?) AS t ORDER BY b, id) AS q WHERE q.a = ? OR q.b = ? OR q.b = ?";
+            String query = "SELECT q.id, q.x10 * 10 FROM (SELECT t.eid id, t.x + 9 x10, t.astr a, t.bstr b FROM (SELECT entity_id eid, a_string astr, b_string bstr, a_byte + 1 x FROM aTable WHERE a_byte + 1 < ?) AS t ORDER BY b, id) AS q WHERE q.a = ? OR q.b = ? OR q.b = ?";
             PreparedStatement statement = conn.prepareStatement(query);
-            statement.setString(1, ROW8);
+            statement.setInt(1, 9);
             statement.setString(2, A_VALUE);
             statement.setString(3, C_VALUE);
             statement.setString(4, E_VALUE);
             ResultSet rs = statement.executeQuery();
             assertTrue (rs.next());
             assertEquals(ROW1,rs.getString(1));
-            assertEquals(1380,rs.getShort(2));
+            assertEquals(110,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW4,rs.getString(1));
-            assertEquals(1410,rs.getShort(2));
+            assertEquals(140,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW2,rs.getString(1));
-            assertEquals(1390,rs.getShort(2));
+            assertEquals(120,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW5,rs.getString(1));
-            assertEquals(1420,rs.getShort(2));
+            assertEquals(150,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW3,rs.getString(1));
-            assertEquals(1400,rs.getShort(2));
+            assertEquals(130,rs.getInt(2));
             assertTrue (rs.next());
             assertEquals(ROW6,rs.getString(1));
-            assertEquals(1430,rs.getShort(2));
+            assertEquals(160,rs.getInt(2));
 
             assertFalse(rs.next());
             
             // select(select(select) join (select(select)))
-            query = "SELECT q1.id, q2.id FROM (SELECT t.eid id, t.astr a, t.bstr b FROM (SELECT entity_id eid, a_string astr, b_string bstr FROM aTable) AS t WHERE t.eid >= ?) AS q1" 
-                        + " JOIN (SELECT t.eid id, t.astr a, t.bstr b FROM (SELECT entity_id eid, a_string astr, b_string bstr FROM aTable) AS t) AS q2 ON q1.a = q2.b" 
-                        + " WHERE q2.id != ? ORDER BY q1.id, q2.id DESC";
+            query = "SELECT q1.id, q2.id FROM (SELECT t.eid id, t.astr a, t.bstr b FROM (SELECT entity_id eid, a_string astr, b_string bstr, a_byte abyte FROM aTable) AS t WHERE t.abyte >= ?) AS q1" 
+                        + " JOIN (SELECT t.eid id, t.astr a, t.bstr b, t.abyte x FROM (SELECT entity_id eid, a_string astr, b_string bstr, a_byte abyte FROM aTable) AS t) AS q2 ON q1.a = q2.b" 
+                        + " WHERE q2.x != ? ORDER BY q1.id, q2.id DESC";
             statement = conn.prepareStatement(query);
-            statement.setString(1, ROW8);
-            statement.setString(2, ROW5);
+            statement.setInt(1, 8);
+            statement.setInt(2, 5);
             rs = statement.executeQuery();
             assertTrue (rs.next());
             assertEquals(ROW8,rs.getString(1));
